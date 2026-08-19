@@ -288,7 +288,7 @@ func WorkerWithGate(consumeCtx, requestCtx context.Context, characteristics pipe
 						// recording is gated on a strict 2xx: usage is only
 						// meaningful for real completions.
 						if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-							if input, output, ok := ParseUsage(resp.Body); ok {
+							if input, output, ok := ParseUsage(resp.Body, msg.RequestURL); ok {
 								metrics.RecordTokens(input, output, queueID, queueName, msg.WorkerPoolID)
 							}
 						}
