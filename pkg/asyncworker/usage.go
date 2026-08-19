@@ -35,14 +35,24 @@ func ParseUsage(body []byte, requestURL string) (input, output int64, ok bool) {
 }
 
 // openAICompletionsEndpoint reports whether requestURL points at an
-// OpenAI-style completions endpoint. Matching on the path suffix keeps
-// gateways behind custom base paths (and per-request endpoint overrides)
-// working while skipping the parse everywhere else.
+// OpenAI-style completions endpoint. It mirrors llm-d-router's parser path
+// suffix matching (pkg/epp/framework/common/request/headers.go MatchPathSuffix),
+// which claims the bare suffixes "v1/completions" and "v1/chat/completions",
+// so gateways behind custom base paths (and per-request endpoint overrides)
+// keep working while the parse is skipped everywhere else.
 func openAICompletionsEndpoint(requestURL string) bool {
 	u, err := url.Parse(requestURL)
 	if err != nil {
 		return false
 	}
-	path := strings.TrimSuffix(u.Path, "/")
-	return strings.HasSuffix(path, "/v1/completions") || strings.HasSuffix(path, "/v1/chat/completions")
+	return matchPathSuffix(u.Path, "v1/completions") || matchPathSuffix(u.Path, "v1/chat/completions")
+}
+
+// matchPathSuffix reports whether path matches suffix, replicating
+// llm-d-router's MatchPathSuffix: both sides are slash-trimmed so the match
+// is independent of leading/trailing slashes.
+func matchPathSuffix(path, suffix string) bool {
+	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	suffix = strings.Trim(strings.TrimSpace(suffix), "/")
+	return strings.HasSuffix(path, suffix)
 }
