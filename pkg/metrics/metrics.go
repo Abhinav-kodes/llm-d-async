@@ -242,6 +242,7 @@ func (c *deadlineProximityCollector) Collect(ch chan<- prometheus.Metric) {
 func (s *deadlineProximitySeries) bucketCounts() map[float64]uint64 {
 	buckets := make(map[float64]uint64, len(s.cumulative))
 	for i, b := range deadlineProximityBuckets {
+		// #nosec G115 -- Set clamps cumulative counts to >= 0, so the conversion cannot wrap.
 		buckets[float64(b.Milliseconds())] = uint64(s.cumulative[i])
 	}
 	return buckets
@@ -270,6 +271,7 @@ func (s *deadlineProximitySeries) total() uint64 {
 	if len(s.cumulative) == 0 {
 		return 0
 	}
+	// #nosec G115 -- Set clamps cumulative counts to >= 0, so the conversion cannot wrap.
 	return uint64(s.cumulative[len(s.cumulative)-1])
 }
 
