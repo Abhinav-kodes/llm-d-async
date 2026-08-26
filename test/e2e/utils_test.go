@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/pubsub/v2"
@@ -108,6 +109,16 @@ func getResultCount(ctx context.Context, rdb *redis.Client, queue string) int64 
 	n, err := rdb.LLen(ctx, queue).Result()
 	gomega.ExpectWithOffset(1, err).NotTo(gomega.HaveOccurred())
 	return n
+}
+
+// clearTerminalMarkers deletes the dedup markers of the given request ids.
+// Markers live up to result_dedup_ttl_seconds, so specs that reuse fixed
+// request ids must clear them or a rerun against the same Redis will have
+// its results correctly (but confusingly) suppressed as duplicates.
+func clearTerminalMarkers(ctx context.Context, ids ...string) {
+	for _, id := range ids {
+		rdb.Del(ctx, "result-terminal:"+id) //nolint:errcheck
+	}
 }
 
 func popResult(ctx context.Context, rdb *redis.Client, queue string) *api.ResultMessage {
@@ -400,4 +411,10 @@ func setDispatchGateBudget(ctx context.Context, rdb *redis.Client, budget string
 
 func clearDispatchGateBudget(ctx context.Context, rdb *redis.Client) {
 	rdb.Del(ctx, dispatchGateBudgetKey) //nolint:errcheck
+}
+
+// memberHasID reports whether a serialized request/result payload carries the
+// given internal request id.
+func memberHasID(member, id string) bool {
+	return len(member) > 0 && strings.Contains(member, `"id":"`+id+`"`)
 }
