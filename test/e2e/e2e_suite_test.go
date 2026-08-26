@@ -170,6 +170,13 @@ func setupK8sCluster() {
 	output, err := checkCmd.Output()
 	if err == nil && strings.Contains(string(output), kindClusterName) {
 		ginkgo.By("Kind cluster " + kindClusterName + " already exists, rebuilding and loading llm-d-async image")
+		// The kubeconfig under os.TempDir() may have been cleaned since the
+		// cluster was created; re-export it before anything loads a client.
+		exportCmd := exec.Command("kind", "export", "kubeconfig",
+			"--name", kindClusterName, "--kubeconfig", kindKubeconfig)
+		exportSession, err := gexec.Start(exportCmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		gomega.Eventually(exportSession).WithTimeout(30 * time.Second).Should(gexec.Exit(0))
 		command := exec.Command(containerRuntime, "build", "-t", apImage, projectRoot())
 		session, err := gexec.Start(command, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
@@ -387,6 +394,7 @@ func applyManifests() {
 		{"prometheus-query", helmValuesDir + "/prometheus-query.yaml"},
 		{"endpoint-scrape", helmValuesDir + "/endpoint-scrape.yaml"},
 		{"short-drain", helmValuesDir + "/short-drain.yaml"},
+		{"hard-kill", helmValuesDir + "/hard-kill.yaml"},
 		{"multitenant", helmValuesDir + "/multitenant.yaml"},
 		{"tier-priority", helmValuesDir + "/tier-priority.yaml"},
 		{"mt-merge", helmValuesDir + "/mt-merge.yaml"},
@@ -399,6 +407,24 @@ func applyManifests() {
 			"ap.image.tag":        imageTag,
 		})
 	}
+	// helm upgrade is a no-op when rendered manifests are unchanged, so a
+	// rebuilt image under the same tag would never reach the pods. Restart
+	// every processor deployment so specs always exercise the loaded image.
+	ginkgo.By("Rolling restart of llm-d-async deployments")
+	cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "rollout", "restart",
+		"deployment", "-l", "app.kubernetes.io/name=llm-d-async")
+	sess, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(sess).WithTimeout(60 * time.Second).Should(gexec.Exit(0))
+
+	cmd = exec.Command("kubectl", "--kubeconfig", kindKubeconfig,
+		"-n", nsName, "wait", "deployment", "--all",
+		"-l", "app.kubernetes.io/name=llm-d-async",
+		"--for=condition=available", "--timeout=180s")
+	sess, err = gexec.Start(cmd, ginkgo.GinkgoWriter, ginkgo.GinkgoWriter)
+	gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+	gomega.Eventually(sess).WithTimeout(200 * time.Second).Should(gexec.Exit(0))
 }
 
 // kubectlPatchEnvoyNodePort patches the Envoy service to NodePort so test code

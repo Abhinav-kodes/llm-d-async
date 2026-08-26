@@ -111,6 +111,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 	ginkgo.It("surfaces expired messages as deadline exceeded and processes valid ones", func() {
 		expiredMsg := makeRequestMessage("expired-msg", -100*time.Second)
 		validMsg := makeRequestMessage("valid-msg", 5*time.Minute)
+		clearTerminalMarkers(ctx, "expired-msg", "valid-msg")
 
 		enqueueMessage(ctx, rdb, integrationRequestQueue, expiredMsg)
 		enqueueMessage(ctx, rdb, integrationRequestQueue, validMsg)
@@ -196,6 +197,7 @@ var _ = ginkgo.Describe("General Integration", func() {
 		})
 
 		ids := []string{"shutdown-1", "shutdown-2", "shutdown-3"}
+		clearTerminalMarkers(ctx, ids...)
 		for _, id := range ids {
 			enqueueMessage(ctx, rdb, integrationRequestQueue, makeRequestMessage(id, 5*time.Minute))
 		}
@@ -223,18 +225,48 @@ var _ = ginkgo.Describe("General Integration", func() {
 		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
 		gomega.Eventually(session).WithTimeout(180 * time.Second).Should(gexec.Exit(0))
 
-		// Two-phase shutdown: in-flight requests should complete during
-		// drain instead of being immediately cancelled and re-enqueued.
+		// Durability contract: after shutdown every accepted request sits in
+		// exactly ONE durable home — a terminal result record, the pending set,
+		// the retry queue, or a live claim — and at least one completed during
+		// the drain phase.
 		resultCount := getResultCount(ctx, rdb, integrationResultQueue)
-		requeueCount := rdb.ZCard(ctx, integrationRequestQueue).Val()
-
-		// At least one request must have completed (proves drain works).
 		gomega.Expect(resultCount).To(gomega.BeNumerically(">=", 1),
 			"expected at least one in-flight request to complete during drain phase")
 
-		// No messages lost or duplicated: completed results + re-enqueued = total.
-		gomega.Expect(resultCount+requeueCount).To(gomega.Equal(int64(len(ids))),
-			"expected no message loss: results + re-enqueued should equal total")
+		resultsRaw, err := rdb.LRange(ctx, integrationResultQueue, 0, -1).Result()
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		retryMembers, err := rdb.ZRange(ctx, "retry-sortedset", 0, -1).Result()
+		gomega.Expect(err).ShouldNot(gomega.HaveOccurred())
+		pendingMembers := rdb.ZRange(ctx, integrationRequestQueue, 0, -1).Val()
+		for _, id := range ids {
+			results, pending, retry := 0, 0, 0
+			for _, e := range resultsRaw {
+				if memberHasID(e, id) {
+					results++
+				}
+			}
+			for _, m := range pendingMembers {
+				if memberHasID(m, id) {
+					pending++
+				}
+			}
+			for _, m := range retryMembers {
+				if memberHasID(m, id) {
+					retry++
+				}
+			}
+			claimed, cErr := rdb.HExists(ctx, integrationRequestQueue+":claimed", id).Result()
+			gomega.Expect(cErr).ShouldNot(gomega.HaveOccurred())
+			// A live claim is an ownership overlay, not a delivery home: a
+			// request parked in the retry queue legitimately stays claimed
+			// until its eventual result acks.
+			deliveries := results + pending + retry
+			gomega.Expect(results).To(gomega.BeNumerically("<=", 1),
+				"request %s produced %d terminal records", id, results)
+			gomega.Expect(deliveries).To(gomega.Equal(1),
+				"request %s must have exactly one delivery outcome (recorded xor queued once), got results=%d pending=%d retry=%d claimed=%v",
+				id, results, pending, retry, claimed)
+		}
 	})
 
 	ginkgo.It("re-enqueues in-flight messages when drain timeout is exceeded", func() {
