@@ -737,11 +737,20 @@ func TestSortedSetFlow_ResultBatchClearsCancellationMarkers(t *testing.T) {
 		}
 	}
 
-	if exists, _ := rdb.Exists(ctx, api.RequestCancellationKey(cancelledID)).Result(); exists != 0 {
-		t.Fatalf("expected cancellation marker for %q to be cleared after result flush", cancelledID)
-	}
-	if exists, _ := rdb.Exists(ctx, api.RequestActiveTokenKey(cancelledID)).Result(); exists != 0 {
-		t.Fatalf("expected active token for %q to be cleared after result flush", cancelledID)
+	// Cleanup runs after the result push becomes visible, so poll for it
+	// rather than asserting in the same instant the list length flips.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cancelExists, _ := rdb.Exists(ctx, api.RequestCancellationKey(cancelledID)).Result()
+		activeExists, _ := rdb.Exists(ctx, api.RequestActiveTokenKey(cancelledID)).Result()
+		if cancelExists == 0 && activeExists == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expected request state for %q cleared after result flush (cancel=%d active=%d)",
+				cancelledID, cancelExists, activeExists)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

@@ -83,12 +83,22 @@ type SortedSetConfig struct {
 	// RetryQueueName is the sorted set holding backoff retries, scored by
 	// retry-due time. Retries re-enter their request queue (with the original
 	// deadline score) only once due, so backoff is actually enforced.
-	RetryQueueName  string                 `json:"retry_queue_name,omitempty"`
-	ResultQueueName string                 `json:"result_queue_name,omitempty"`
-	PollIntervalMs  int                    `json:"poll_interval_ms,omitempty"`
-	BatchSize       int                    `json:"batch_size,omitempty"`
-	EnableTracing   bool                   `json:"enable_tracing,omitempty"`
-	Queues          []SortedSetQueueConfig `json:"queues"`
+	RetryQueueName  string `json:"retry_queue_name,omitempty"`
+	ResultQueueName string `json:"result_queue_name,omitempty"`
+	PollIntervalMs  int    `json:"poll_interval_ms,omitempty"`
+	BatchSize       int    `json:"batch_size,omitempty"`
+	EnableTracing   bool   `json:"enable_tracing,omitempty"`
+	// ClaimLeaseTTLSeconds bounds how long one consumer may hold a dequeued
+	// request before survivors treat it as abandoned and redeliver it.
+	// Should exceed the longest possible inference time for the queues served.
+	ClaimLeaseTTLSeconds int64 `json:"claim_lease_ttl_seconds,omitempty"`
+	// ClaimReclaimIntervalMs is how often expired claims are scanned for
+	// redelivery.
+	ClaimReclaimIntervalMs int64 `json:"claim_reclaim_interval_ms,omitempty"`
+	// ResultDedupTTLSeconds is the lifetime of per-request terminal-result
+	// markers that collapse duplicate records under at-least-once delivery.
+	ResultDedupTTLSeconds int64                  `json:"result_dedup_ttl_seconds,omitempty"`
+	Queues                []SortedSetQueueConfig `json:"queues"`
 }
 
 // LoadSortedSetConfig parses, applies env overrides/defaults, and validates a SortedSetConfig.
@@ -126,6 +136,19 @@ func (c *SortedSetConfig) ApplyDefaults() {
 	}
 	if c.BatchSize == 0 {
 		c.BatchSize = 10
+	}
+	// Durable-dequeue defaults: a 5-minute lease comfortably exceeds
+	// typical inference latencies while keeping crash redelivery bounded;
+	// claims are scanned every 15s; terminal markers outlive typical batch
+	// jobs by hours so late duplicate deliveries collapse silently.
+	if c.ClaimLeaseTTLSeconds == 0 {
+		c.ClaimLeaseTTLSeconds = 300
+	}
+	if c.ClaimReclaimIntervalMs == 0 {
+		c.ClaimReclaimIntervalMs = 15000
+	}
+	if c.ResultDedupTTLSeconds == 0 {
+		c.ResultDedupTTLSeconds = 21600 // 6h
 	}
 	for i := range c.Queues {
 		if c.Queues[i].RequestPathURL == "" {
