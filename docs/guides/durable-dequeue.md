@@ -101,3 +101,7 @@ Metrics: `async_claim_depth` (claimed per queue), `async_claims_expired_total`
 - Graceful shutdown hands unacked claims back to pending but cannot return
   requests held inside plugin goroutines that ignore context cancellation;
   those wait out their lease like hard-kill losses.
+- No delivery counter or dead-letter queue: redelivery is bounded by each
+  request's deadline — once it passes, the deadline-exceeded path produces the
+  terminal record. Projects like asynq cap attempts and archive instead; here
+  the deadline plays that role for batch workloads.
