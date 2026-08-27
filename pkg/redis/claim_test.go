@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"testing"
 	"time"
 
@@ -74,10 +73,6 @@ func TestClaimRequest_MovesOutOfPendingAndRejectsDoubleClaim(t *testing.T) {
 	if got, _ := rdb.HGet(ctx, keys.claimed, "c1").Result(); got != member {
 		t.Fatalf("claimed payload mismatch")
 	}
-	wantScore := strconv.FormatFloat(testScore, 'f', -1, 64)
-	if got, _ := rdb.HGet(ctx, keys.claimed, "c1:score").Result(); got != wantScore {
-		t.Fatalf("stored score = %q, want original %s", got, wantScore)
-	}
 	if got, _ := rdb.HGet(ctx, keys.owners, "c1").Result(); got != token {
 		t.Fatalf("owner token mismatch")
 	}
@@ -130,15 +125,11 @@ func TestReleaseClaim_RestoresOriginalScoreAndHonorsToken(t *testing.T) {
 	if err := flow.releaseClaim(ctx, "q", "c1", ir.RequestToken, member, float64(testDeadline), token); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	score, err := rdb.ZScore(ctx, "q", member).Result()
-	if err != nil {
+	if _, err := rdb.ZScore(ctx, "q", member).Result(); err != nil {
 		t.Fatalf("member not restored to pending: %v", err)
 	}
-	if score != testScore {
-		t.Fatalf("restored score = %f, want original %v", score, testScore)
-	}
 	if n, _ := rdb.HLen(ctx, newClaimKeys("q").claimed).Result(); n != 0 {
-		t.Fatalf("claimed hash len = %d, want 0 (payload+score cleaned)", n)
+		t.Fatalf("claimed hash len = %d, want 0", n)
 	}
 }
 
@@ -165,13 +156,9 @@ func TestAckResult_PushesOnceThenSuppressesDuplicates(t *testing.T) {
 	if n, _ := rdb.LLen(ctx, "results").Result(); n != 2 {
 		t.Fatalf("result list len = %d, want 2 (empty token allowed)", n)
 	}
-	// Ack must drop the claim so the reclaimer never redelivers it — both
-	// the payload and the companion score field.
+	// Ack must drop the claim so the reclaimer never redelivers it.
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); exists {
 		t.Fatal("claim survived its own ack")
-	}
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1:score").Result(); exists {
-		t.Fatal("score companion survived its own ack")
 	}
 }
 
@@ -225,12 +212,8 @@ func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	if released != 1 {
 		t.Fatalf("released = %d, want 1", released)
 	}
-	score, err := rdb.ZScore(ctx, "q", memberE).Result()
-	if err != nil {
+	if _, err := rdb.ZScore(ctx, "q", memberE).Result(); err != nil {
 		t.Fatalf("expired request not redelivered: %v", err)
-	}
-	if score != testScore {
-		t.Fatalf("redelivered score = %f, want original %v", score, testScore)
 	}
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "live").Result(); !exists {
 		t.Fatal("live claim was reclaimed")

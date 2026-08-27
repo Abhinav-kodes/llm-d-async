@@ -133,14 +133,6 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_gate_metric_source_available",
 		Help: "1 when a metric-based dispatch gate's last evaluation got a usable reading from its metric source, 0 when it fell back to the configured 'fallback' budget (query error, no samples, or NaN/Inf). Distinguishes a fallback budget from a real reading of the same number: async_dispatch_budget 0 with this at 1 means a saturated pool, at 0 means unreadable metrics. async_gate_metric_value is stale whenever this is 0.",
 	}, gateLabels)
-	ClaimDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Subsystem: SchedulerSubsystem, Name: "async_claim_depth",
-		Help: "Number of requests currently claimed (dequeued under a lease) per queue. Compare against async_broker_backlog to see in-flight work; claims that outlive their lease are redelivered.",
-	}, queueLabels)
-	ClaimsExpired = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Subsystem: SchedulerSubsystem, Name: "async_claims_expired_total",
-		Help: "Total number of claims whose lease expired and whose requests were redelivered to the queue (evidence of consumer crash or lease too short).",
-	}, queueLabels)
 )
 
 // Gate decision reason label values for async_gate_decisions_total.
@@ -438,17 +430,6 @@ func SetGateMetricSourceAvailable(available bool, queueID, queueName, poolName, 
 	GateMetricSourceAvailable.WithLabelValues(queueID, queueName, poolName, inferencePool).Set(v)
 }
 
-// RecordClaimExpired counts a claim whose lease lapsed and whose request was
-// redelivered.
-func RecordClaimExpired(queueID, queueName, poolName string) {
-	ClaimsExpired.WithLabelValues(queueID, queueName, poolName).Inc()
-}
-
-// SetClaimDepth reports how many requests the queue currently holds claimed.
-func SetClaimDepth(n float64, queueID, queueName, poolName string) {
-	ClaimDepth.WithLabelValues(queueID, queueName, poolName).Set(n)
-}
-
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{
@@ -457,7 +438,6 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 		DeadlineProximity,
 		DispatchBudget, PoolWorkerLimit, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
-		ClaimDepth, ClaimsExpired,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

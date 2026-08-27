@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-async/api"
-	"github.com/llm-d/llm-d-async/pkg/metrics"
 	"github.com/redis/go-redis/v9"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	logutil "sigs.k8s.io/gateway-api-inference-extension/pkg/epp/util/logging"
@@ -56,32 +55,25 @@ func newClaimKeys(queueName string) claimKeys {
 
 // CLAIM moves one member from pending to claimed. Returns 0 when another
 // consumer won. Overwrites an existing self-claim (retried requests re-enter
-// pending while still owned). Stores the original sort score under an
-// "<id>:score" companion field for exact restoration.
+// pending while still owned).
 var claimScript = redis.NewScript(`
 if redis.call('ZREM', KEYS[1], ARGV[2]) == 0 then
   return 0
 end
 redis.call('HSET', KEYS[2], ARGV[1], ARGV[2])
-redis.call('HSET', KEYS[2], ARGV[1] .. ':score', ARGV[5])
 redis.call('HSET', KEYS[3], ARGV[1], ARGV[3])
 redis.call('ZADD', KEYS[4], ARGV[4], ARGV[1])
 return 1
 `)
 
-// RELEASE hands a claimed request back to pending at its original sort score.
+// RELEASE hands a claimed request back to pending at deadline score.
 // Token-guarded: a stale owner must not drop the new owner's claim.
 var releaseClaimScript = redis.NewScript(`
 if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[4] then
   return 0
 end
-local score = redis.call('HGET', KEYS[2], ARGV[1] .. ':score')
-if not score then
-  score = ARGV[3]
-end
-redis.call('ZADD', KEYS[1], tonumber(score), ARGV[2])
+redis.call('ZADD', KEYS[1], tonumber(ARGV[3]), ARGV[2])
 redis.call('HDEL', KEYS[2], ARGV[1])
-redis.call('HDEL', KEYS[2], ARGV[1] .. ':score')
 redis.call('HDEL', KEYS[3], ARGV[1])
 redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
@@ -108,14 +100,13 @@ if listTTL > 0 then
   redis.call('EXPIRE', KEYS[4], listTTL)
 end
 redis.call('HDEL', KEYS[1], ARGV[1])
-redis.call('HDEL', KEYS[1], ARGV[1] .. ':score')
 redis.call('HDEL', KEYS[2], ARGV[1])
 redis.call('ZREM', KEYS[3], ARGV[1])
 return 1
 `)
 
-// RECLAIMIFEXPIRED redelivers an expired claim back to pending at its
-// original sort score; renewed claims and ghosts are left alone.
+// RECLAIMIFEXPIRED redelivers an expired claim back to pending at deadline
+// score; renewed claims and ghosts are left alone.
 var reclaimExpiredScript = redis.NewScript(`
 local exp = redis.call('ZSCORE', KEYS[4], ARGV[1])
 if not exp then
@@ -129,13 +120,8 @@ if not payload then
   redis.call('ZREM', KEYS[4], ARGV[1])
   return 0
 end
-local score = redis.call('HGET', KEYS[2], ARGV[1] .. ':score')
-if not score then
-  score = ARGV[2]
-end
-redis.call('ZADD', KEYS[1], tonumber(score), payload)
+redis.call('ZADD', KEYS[1], tonumber(ARGV[2]), payload)
 redis.call('HDEL', KEYS[2], ARGV[1])
-redis.call('HDEL', KEYS[2], ARGV[1] .. ':score')
 redis.call('HDEL', KEYS[3], ARGV[1])
 redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
@@ -323,12 +309,8 @@ func (r *RedisSortedSetFlow) reclaimExpiredClaims(ctx context.Context) (released
 			}
 			if res == 1 {
 				released++
-				metrics.RecordClaimExpired(ch.queueID, queueName, r.poolNameFor(ch.queueID))
 				logger.V(logutil.DEBUG).Info("Reclaimed expired claim, redelivering", "id", id, "queue", queueName)
 			}
-		}
-		if depth, err := r.rdb.ZCard(ctx, keys.idx).Result(); err == nil {
-			metrics.SetClaimDepth(float64(depth), ch.queueID, queueName, r.poolNameFor(ch.queueID))
 		}
 	}
 	return released, nil

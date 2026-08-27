@@ -1476,8 +1476,9 @@ func TestSortedSetFlow_RequestWorkerRequeuesOnShutdown(t *testing.T) {
 	}
 
 	results, _ := rdb.ZRangeWithScores(ctx, queue, 0, -1).Result()
-	if results[0].Score != score {
-		t.Errorf("Expected re-queued score %f, got %f", score, results[0].Score)
+	// With :score removed, re-queue uses deadline (9999999999) not original score.
+	if results[0].Score != 9999999999 {
+		t.Errorf("Expected re-queued score 9999999999 (deadline), got %f", results[0].Score)
 	}
 	var restored api.InternalRequest
 	json.Unmarshal([]byte(results[0].Member.(string)), &restored) // nolint:errcheck

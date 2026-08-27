@@ -72,12 +72,7 @@ Every exit path is paired with exactly one claim outcome:
 | `claim_lease_ttl_seconds`   | `300`   | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. Must exceed the longest inference plus drain time. |
 | `claim_reclaim_interval_ms` | `15000` | How often expired claims are scanned for redelivery. This bounds how long a crashed instance's work stalls.                                                      |
 
-Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclaim_interval_ms`); CLI flags are deferred to a follow-up. The heartbeat interval is derived (`lease TTL / 3`, clamped to 1s–30s) and is not separately configurable.
-
-Metrics: `async_claim_depth` (claimed per queue, via `ZCard(claims-idx)`),
-`async_claims_expired_total` (redeliveries — spikes indicate crashes or
-too-short leases). Richer per-result dedup metrics can follow once the core
-path is proven.
+Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclaim_interval_ms`); CLI flags are deferred to a follow-up. The heartbeat interval is derived (`lease TTL / 3`, clamped to 1s–30s) and is not separately configurable. Claim metrics are deferred to a follow-up once the core path is proven.
 
 ## Operational requirements
 
