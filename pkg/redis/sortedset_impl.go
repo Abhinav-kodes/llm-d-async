@@ -527,7 +527,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		if deadline < currentTime {
 			logger.V(logutil.DEFAULT).Info("Deadline expired", "id", reqID)
 			metrics.RecordExceededDeadlineReq(queueID, queueName, poolName)
-			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline, z.Score)
+			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
 			if claimErr != nil {
 				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim expired request", "id", reqID)
 				continue
@@ -558,7 +558,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			// authoritative pre-dispatch cancellation check and fails closed.
 			logger.V(logutil.DEFAULT).Error(err, "Failed to check request cancellation", "id", reqID)
 		} else if cancelled {
-			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline, z.Score)
+			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
 			if claimErr != nil {
 				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim cancelled request", "id", reqID)
 				continue
@@ -607,7 +607,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			} else {
 				resultMsg = api.NewGateDroppedResult(rview, ir.InternalRouting)
 			}
-			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline, z.Score)
+			token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
 			if claimErr != nil {
 				logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim dropped request", "id", reqID)
 				continue
@@ -627,7 +627,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		// Claim before handing downstream: past msgChannel the request
 		// lives only in process memory, so this lease is its sole recovery
 		// path if the process dies.
-		token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline, z.Score)
+		token, claimed, claimErr := r.claimRequest(ctx, queueName, ir, member, deadline)
 		if claimErr != nil {
 			logger.V(logutil.DEFAULT).Error(claimErr, "Failed to claim request", "id", reqID)
 			pipeline.ReleaseGateReleases(releases)

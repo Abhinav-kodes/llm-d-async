@@ -59,7 +59,7 @@ func TestClaimRequest_MovesOutOfPendingAndRejectsDoubleClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	token, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore)
+	token, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline))
 	if err != nil || !ok {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -79,7 +79,7 @@ func TestClaimRequest_MovesOutOfPendingAndRejectsDoubleClaim(t *testing.T) {
 
 	// Double-claim by another consumer must lose the race: the member is no
 	// longer pending.
-	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore); ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); ok || err != nil {
 		t.Fatalf("double claim: ok=%v err=%v, want false/nil", ok, err)
 	}
 }
@@ -89,14 +89,14 @@ func TestClaimRequest_SelfOverwriteOnRetryReturn(t *testing.T) {
 
 	ir, member := claimEnvelope(t, "c1", testDeadline)
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
-	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("first claim: ok=%v err=%v", ok, err)
 	}
 
 	// The retry mover re-enters due retries into the pending set while the
 	// original claim is still alive; re-claiming must overwrite, not fail.
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
-	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("self re-claim: ok=%v err=%v", ok, err)
 	}
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); !exists {
@@ -109,7 +109,7 @@ func TestReleaseClaim_RestoresOriginalScoreAndHonorsToken(t *testing.T) {
 
 	ir, member := claimEnvelope(t, "c1", testDeadline)
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
-	token, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore)
+	token, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline))
 	if !ok || err != nil {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
@@ -138,7 +138,7 @@ func TestAckResult_PushesOnceThenSuppressesDuplicates(t *testing.T) {
 
 	ir, member := claimEnvelope(t, "c1", testDeadline)
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
-	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 
@@ -193,7 +193,7 @@ func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	flow.claimLeaseTTL = -2 * time.Second
 	irE, memberE := claimEnvelope(t, "expired", testDeadline)
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: memberE})
-	if _, ok, err := flow.claimRequest(ctx, "q", irE, memberE, float64(testDeadline), testScore); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", irE, memberE, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("claim expired-case: ok=%v err=%v", ok, err)
 	}
 	// Live claim: untouched.
@@ -201,7 +201,7 @@ func TestReclaimExpiredClaims_RedeliversOnlyLapsedLeases(t *testing.T) {
 	irL, memberL := claimEnvelope(t, "live", testDeadline)
 	flow.claimLeaseTTL = time.Hour
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore + 1, Member: memberL})
-	if _, ok, err := flow.claimRequest(ctx, "q", irL, memberL, float64(testDeadline), testScore+1); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", irL, memberL, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("claim live-case: ok=%v err=%v", ok, err)
 	}
 
@@ -225,7 +225,7 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 
 	ir, member := claimEnvelope(t, "c1", testDeadline)
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
-	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 
@@ -282,7 +282,7 @@ func TestHeartbeatClaims_ExtendsLiveLeases(t *testing.T) {
 
 	ir, member := claimEnvelope(t, "c1", testDeadline)
 	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member})
-	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline), testScore); !ok || err != nil {
+	if _, ok, err := flow.claimRequest(ctx, "q", ir, member, float64(testDeadline)); !ok || err != nil {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 	before, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, "c1").Result()

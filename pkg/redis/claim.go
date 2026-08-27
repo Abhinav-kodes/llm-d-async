@@ -186,9 +186,8 @@ func (r *RedisSortedSetFlow) claimExpiry(deadline float64) float64 {
 }
 
 // claimRequest claims one peeked request. On success the caller owns the
-// request until it acks a terminal result, releases it, or dies. originalScore
-// is the pending zset score it was peeked at; release/redelivery restores it.
-func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string, ir *api.InternalRequest, member string, deadline float64, originalScore float64) (token string, ok bool, err error) {
+// request until it acks a terminal result, releases it, or dies.
+func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string, ir *api.InternalRequest, member string, deadline float64) (token string, ok bool, err error) {
 	token, err = newClaimToken()
 	if err != nil {
 		return "", false, err
@@ -198,7 +197,7 @@ func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string,
 	reqToken := ir.RequestToken
 	res, err := claimScript.Run(ctx, r.rdb, []string{
 		keys.pending, keys.claimed, keys.owners, keys.idx,
-	}, reqID, member, token, r.claimExpiry(deadline), originalScore).Int()
+	}, reqID, member, token, r.claimExpiry(deadline)).Int()
 	if err != nil {
 		return "", false, fmt.Errorf("claim request %q on queue %q: %w", reqID, queueName, err)
 	}
