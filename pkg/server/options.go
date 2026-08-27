@@ -41,11 +41,6 @@ type TransportOptions struct {
 	ConfigFile            string
 	MergePolicyConfigFile string
 	BacklogPollInterval   time.Duration
-
-	// Durable-dequeue tuning. Only consumed by the redis-sortedset
-	// transport; ignored when a transport config file supplies its own values.
-	ClaimLeaseTTL        time.Duration
-	ClaimReclaimInterval time.Duration
 }
 
 type ObservabilityConfig struct {
@@ -107,10 +102,8 @@ func NewOptions() *Options {
 				DrainTimeout:   2 * time.Minute,
 			},
 			Transport: TransportOptions{
-				Type:                 "redis-pubsub",
-				BacklogPollInterval:  15 * time.Second,
-				ClaimLeaseTTL:        5 * time.Minute,
-				ClaimReclaimInterval: 15 * time.Second,
+				Type:                "redis-pubsub",
+				BacklogPollInterval: 15 * time.Second,
 			},
 			Observability: ObservabilityConfig{
 				Verbosity: logging.DEFAULT,
@@ -149,11 +142,6 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	// Deprecated: use --request-merge-policy-config-file. Retained for backwards compatibility.
 	fs.StringVar(&o.legacyMergePolicyConfigFile, "request-merge-policy-config", o.legacyMergePolicyConfigFile, "Deprecated: use --request-merge-policy-config-file. Path to the request merge policy configuration JSON file")
 	fs.DurationVar(&o.Transport.BacklogPollInterval, "metrics-backlog-poll-interval", o.Transport.BacklogPollInterval, "interval to poll the broker for queue backlog metrics (0 disables); only applies to flows that support it (redis-sortedset, gcp-pubsub)")
-	// Durable-dequeue tuning, redis-sortedset transport only. Ignored when
-	// --transport-config / --transport-config-file is used; set the matching JSON
-	// fields there instead.
-	fs.DurationVar(&o.Transport.ClaimLeaseTTL, "claim-lease-ttl", o.Transport.ClaimLeaseTTL, "how long a dequeued request's claim survives before another instance redelivers it; should exceed the longest inference plus drain time (redis-sortedset only)")
-	fs.DurationVar(&o.Transport.ClaimReclaimInterval, "claim-reclaim-interval", o.Transport.ClaimReclaimInterval, "how often expired claims are scanned and redelivered (redis-sortedset only)")
 
 	// Deprecated: use --transport / --transport-config instead. Retained for backwards compatibility.
 	fs.StringVar(&o.MessageQueueImpl, "message-queue-impl", o.MessageQueueImpl, "Deprecated: use --transport. The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")

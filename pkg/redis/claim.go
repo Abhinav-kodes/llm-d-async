@@ -88,17 +88,19 @@ return 1
 `)
 
 // ACKRESULT records a terminal result and drops the claim atomically.
-// Only the current owner may publish; stale owners are fenced. If no claim
-// exists (direct result push without prior claim, e.g., tests), the push
-// is allowed.
+// Only the current owner may publish; stale owners are fenced. Missing
+// owners are fenced unless token is empty (direct push without claim,
+// tests) — stale owners with a token vs missing owner are still fenced.
 //
 // KEYS: claimed, owners, idx, resultList
 // ARGV: id, resultJSON, token, listTTLSeconds
 // Returns 1 when the result was recorded, 0 when fenced as stale.
 var ackResultScript = redis.NewScript(`
 local owner = redis.call('HGET', KEYS[2], ARGV[1])
-if owner and owner ~= ARGV[3] then
-  return 0
+if owner ~= ARGV[3] then
+  if not (owner == false and ARGV[3] == "") then
+    return 0
+  end
 end
 redis.call('LPUSH', KEYS[4], ARGV[2])
 local listTTL = tonumber(ARGV[4])
@@ -163,13 +165,25 @@ func newClaimToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// claimKey returns the generation-scoped map key. RequestToken is the
+// per-enqueue generation UUID; ReqID alone may be reused across
+// submissions (see redis_sortedset_producer.go:206-208).
+func claimKey(requestID, requestToken string) string {
+	if requestToken == "" {
+		return requestID
+	}
+	return requestID + "\x00" + requestToken
+}
+
 // claimHandle is what this instance tracks per in-flight request: the
 // ownership proof plus everything the heartbeater needs to renew the claim
 // without re-reading Redis state.
 type claimHandle struct {
-	token    string
-	queue    string
-	deadline float64
+	token        string
+	queue        string
+	deadline     float64
+	requestID    string
+	requestToken string
 }
 
 // claimExpiry computes the lease deadline for a request claimed now: the
@@ -194,25 +208,29 @@ func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string,
 		return "", false, err
 	}
 	keys := newClaimKeys(queueName)
+	reqID := ir.PublicRequest.ReqID()
+	reqToken := ir.RequestToken
 	res, err := claimScript.Run(ctx, r.rdb, []string{
 		keys.pending, keys.claimed, keys.owners, keys.idx,
-	}, ir.PublicRequest.ReqID(), member, token, r.claimExpiry(deadline), originalScore).Int()
+	}, reqID, member, token, r.claimExpiry(deadline), originalScore).Int()
 	if err != nil {
-		return "", false, fmt.Errorf("claim request %q on queue %q: %w", ir.PublicRequest.ReqID(), queueName, err)
+		return "", false, fmt.Errorf("claim request %q on queue %q: %w", reqID, queueName, err)
 	}
 	if res == 0 {
 		return "", false, nil
 	}
-	r.claimTokens.Store(ir.PublicRequest.ReqID(), &claimHandle{
-		token:    token,
-		queue:    queueName,
-		deadline: deadline,
+	r.claimTokens.Store(claimKey(reqID, reqToken), &claimHandle{
+		token:        token,
+		queue:        queueName,
+		deadline:     deadline,
+		requestID:    reqID,
+		requestToken: reqToken,
 	})
 	return token, true, nil
 }
 
 // releaseClaim returns a claimed request to pending during graceful shutdown.
-func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string, requestID string, member string, deadline float64, token string) error {
+func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string, requestID string, requestToken string, member string, deadline float64, token string) error {
 	keys := newClaimKeys(queueName)
 	err := releaseClaimScript.Run(ctx, r.rdb, []string{
 		keys.pending, keys.claimed, keys.owners, keys.idx,
@@ -220,18 +238,18 @@ func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string,
 	if err != nil {
 		return fmt.Errorf("release claim for %q on queue %q: %w", requestID, queueName, err)
 	}
-	r.claimTokens.Delete(requestID)
+	r.claimTokens.Delete(claimKey(requestID, requestToken))
 	return nil
 }
 
 // ackResult records a terminal result (idempotently) and drops this flow's
 // claim. claimQueueName hosts the claim bookkeeping; resultList is the
 // resolved destination. pushed=false means a duplicate was suppressed.
-func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName string, resultList string, requestID string, resultJSON string, listTTL time.Duration) (pushed bool, err error) {
+func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName string, resultList string, requestID string, requestToken string, resultJSON string, listTTL time.Duration) (pushed bool, err error) {
 	// Peek the token rather than consuming it: if the script errors the
 	// caller may retry this ack, and the ownership proof must survive.
 	var token string
-	if v, ok := r.claimTokens.Load(requestID); ok {
+	if v, ok := r.claimTokens.Load(claimKey(requestID, requestToken)); ok {
 		if h, ok := v.(*claimHandle); ok {
 			token = h.token
 		}
@@ -247,7 +265,7 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 	if err != nil {
 		return false, fmt.Errorf("ack result for %q: %w", requestID, err)
 	}
-	r.claimTokens.Delete(requestID)
+	r.claimTokens.Delete(claimKey(requestID, requestToken))
 	if res == 0 {
 		return false, nil
 	}
@@ -351,8 +369,8 @@ func (r *RedisSortedSetFlow) heartbeatInterval() time.Duration {
 
 // heartbeatClaims renews every held claim so slow-but-alive work is not
 // treated as dead. Acked/released ids leave the map and are skipped.
-// Token mismatch (-1) means the lease was taken over; local handles are
-// deleted to prevent deadlock and memory leak.
+// Any result other than 1 (0 = missing, -1 = stolen) means the handle is
+// stale and is deleted to prevent leaks and wasted renewals.
 func (r *RedisSortedSetFlow) heartbeatClaims(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	r.claimTokens.Range(func(key, value any) bool {
@@ -361,12 +379,16 @@ func (r *RedisSortedSetFlow) heartbeatClaims(ctx context.Context) {
 		if !ok || h == nil || id == "" {
 			return true
 		}
-		res, err := r.renewClaim(ctx, h.queue, id, h.deadline, h.token)
+		reqID := h.requestID
+		if reqID == "" {
+			reqID = id
+		}
+		res, err := r.renewClaim(ctx, h.queue, reqID, h.deadline, h.token)
 		if err != nil {
 			logger.V(logutil.DEBUG).Error(err, "Failed to renew claim lease", "id", id)
 			return true
 		}
-		if res == -1 {
+		if res != 1 {
 			r.claimTokens.Delete(id)
 		}
 		return true

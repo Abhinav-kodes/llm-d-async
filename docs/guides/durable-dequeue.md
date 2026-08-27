@@ -27,7 +27,7 @@ Dequeue is now **peek → claim → ack**:
      sort score under a `<id>:score` field),
    - `<queue>:claim-owners` — a random ownership token per claim,
    - `<queue>:claims-idx` — zset of claims scored by lease expiry
-     (`min(claim_lease_ttl, deadline + 30s)`).
+      (`min(claim_lease_ttl, deadline + 5m)`).
 3. **Process as before** — claimed requests flow through the same channels,
    merge policy, and workers. No downstream change.
 4. **Ack** — when a terminal result is flushed, one Lua script checks
@@ -67,15 +67,12 @@ Every exit path is paired with exactly one claim outcome:
 
 ## Configuration
 
-| Flag | Config JSON field | Default | Meaning |
-|---|---|---|---|
-| `--claim-lease-ttl` | `claim_lease_ttl_seconds` | `300` | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. Must exceed the longest inference plus drain time. |
-| `--claim-reclaim-interval` | `claim_reclaim_interval_ms` | `15000` | How often expired claims are scanned for redelivery. This bounds how long a crashed instance's work stalls. |
+| Config JSON field           | Default | Meaning                                                                                                                                                          |
+| -----------------------------| ---------| ------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `claim_lease_ttl_seconds`   | `300`   | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. Must exceed the longest inference plus drain time. |
+| `claim_reclaim_interval_ms` | `15000` | How often expired claims are scanned for redelivery. This bounds how long a crashed instance's work stalls.                                                      |
 
-The heartbeat interval is derived (`lease TTL / 3`, clamped to 1s–30s) and is
-not separately configurable. Flags apply to the redis-sortedset transport and
-are ignored when `--transport-config`/`--transport-config-file` supplies its
-own values.
+Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclaim_interval_ms`); CLI flags are deferred to a follow-up. The heartbeat interval is derived (`lease TTL / 3`, clamped to 1s–30s) and is not separately configurable.
 
 Metrics: `async_claim_depth` (claimed per queue, via `ZCard(claims-idx)`),
 `async_claims_expired_total` (redeliveries — spikes indicate crashes or

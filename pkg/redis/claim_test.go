@@ -120,14 +120,14 @@ func TestReleaseClaim_RestoresOriginalScoreAndHonorsToken(t *testing.T) {
 	}
 
 	// A stale owner must not drop the live claim.
-	if err := flow.releaseClaim(ctx, "q", "c1", member, float64(testDeadline), "deadbeef"); err != nil {
+	if err := flow.releaseClaim(ctx, "q", "c1", ir.RequestToken, member, float64(testDeadline), "deadbeef"); err != nil {
 		t.Fatalf("stale-token release returned error: %v", err)
 	}
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); !exists {
 		t.Fatal("stale token removed a foreign claim")
 	}
 
-	if err := flow.releaseClaim(ctx, "q", "c1", member, float64(testDeadline), token); err != nil {
+	if err := flow.releaseClaim(ctx, "q", "c1", ir.RequestToken, member, float64(testDeadline), token); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	score, err := rdb.ZScore(ctx, "q", member).Result()
@@ -151,19 +151,19 @@ func TestAckResult_PushesOnceThenSuppressesDuplicates(t *testing.T) {
 		t.Fatalf("claim: ok=%v err=%v", ok, err)
 	}
 
-	pushed, err := flow.ackResult(ctx, "q", "results", "c1", `{"id":"c1"}`, 0)
+	pushed, err := flow.ackResult(ctx, "q", "results", "c1", ir.RequestToken, `{"id":"c1"}`, 0)
 	if err != nil || !pushed {
 		t.Fatalf("first ack: pushed=%v err=%v", pushed, err)
 	}
-	pushed, err = flow.ackResult(ctx, "q", "results", "c1", `{"id":"c1"}`, 0)
-	// Without a dedup marker, same-instance retry after a successful ack has
-	// no owner to fence against, so it will push again (at-least-once). The
-	// caller is responsible for not retrying a successful ack.
+	pushed, err = flow.ackResult(ctx, "q", "results", "c1", ir.RequestToken, `{"id":"c1"}`, 0)
+	// Empty token after handle deletion is allowed for direct pushes (tests);
+	// stale owners with a non-empty token would be fenced. Same-instance
+	// retry with empty token is at-least-once.
 	if err != nil || !pushed {
-		t.Fatalf("second ack (no marker, no owner): pushed=%v err=%v, want true/nil", pushed, err)
+		t.Fatalf("second ack (empty token, no owner): pushed=%v err=%v, want true/nil", pushed, err)
 	}
 	if n, _ := rdb.LLen(ctx, "results").Result(); n != 2 {
-		t.Fatalf("result list len = %d, want 2 (no marker, duplicate allowed)", n)
+		t.Fatalf("result list len = %d, want 2 (empty token allowed)", n)
 	}
 	// Ack must drop the claim so the reclaimer never redelivers it — both
 	// the payload and the companion score field.
@@ -185,7 +185,7 @@ func TestAckResult_StaleTokenLeavesForeignClaimIntact(t *testing.T) {
 	rdb.HSet(ctx, keys.owners, "c1", "foreign-token")
 	rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(time.Hour).Unix()), Member: "c1"})
 
-	pushed, err := flow.ackResult(ctx, "q", "results", "c1", `{"id":"c1"}`, 0)
+	pushed, err := flow.ackResult(ctx, "q", "results", "c1", "", `{"id":"c1"}`, 0)
 	if err != nil || pushed {
 		t.Fatalf("stale ack should be fenced: pushed=%v err=%v", pushed, err)
 	}

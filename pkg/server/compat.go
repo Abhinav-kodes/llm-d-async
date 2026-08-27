@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/llm-d/llm-d-async/pipeline"
@@ -211,8 +210,8 @@ func (o *Options) synthesizeRedisSortedSetConfig() ([]byte, error) {
 		PollIntervalMs:         o.RedisSortedSet.PollIntervalMs,
 		BatchSize:              o.RedisSortedSet.BatchSize,
 		EnableTracing:          o.Observability.RedisTracing,
-		ClaimLeaseTTLSeconds:   int64(o.Transport.ClaimLeaseTTL / time.Second),
-		ClaimReclaimIntervalMs: int64(o.Transport.ClaimReclaimInterval / time.Millisecond),
+		ClaimLeaseTTLSeconds:   300,
+		ClaimReclaimIntervalMs: 15000,
 		Queues:                 queues,
 	}
 	data, err := json.Marshal(cfg)

@@ -516,9 +516,9 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		}
 
 		// Runs off the cancelled ctx so the hand-back still reaches Redis.
-		releaseOnShutdown := func(token string) {
+		releaseOnShutdown := func(token string, requestToken string) {
 			if err := retryRedisOp(context.Background(), func(ctx context.Context) error {
-				return r.releaseClaim(ctx, queueName, reqID, member, deadline, token)
+				return r.releaseClaim(ctx, queueName, reqID, requestToken, member, deadline, token)
 			}); err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to release claim on shutdown", "id", reqID)
 			}
@@ -546,7 +546,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			select {
 			case r.resultChannel <- api.NewDeadlineExceededResult(rview, ir.InternalRouting):
 			case <-ctx.Done():
-				releaseOnShutdown(token)
+				releaseOnShutdown(token, ir.RequestToken)
 				return
 			}
 			continue
@@ -569,7 +569,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			select {
 			case r.resultChannel <- api.NewCancelledResult(rview, ir.InternalRouting):
 			case <-ctx.Done():
-				releaseOnShutdown(token)
+				releaseOnShutdown(token, ir.RequestToken)
 				return
 			}
 			continue
@@ -618,7 +618,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 			select {
 			case r.resultChannel <- resultMsg:
 			case <-ctx.Done():
-				releaseOnShutdown(token)
+				releaseOnShutdown(token, ir.RequestToken)
 				return
 			}
 			continue
@@ -656,7 +656,7 @@ func (r *RedisSortedSetFlow) processMessages(ctx context.Context, msgChannel cha
 		case msgChannel <- ir:
 		case <-ctx.Done():
 			r.activeReleases.Delete(reqID)
-			releaseOnShutdown(token)
+			releaseOnShutdown(token, ir.RequestToken)
 			pipeline.ReleaseGateReleases(releases)
 			return
 		}
@@ -734,6 +734,7 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		value           redis.Z
 		originQueue     string // where the claim bookkeeping lives
 		requestID       string
+		requestToken    string
 		requestDeadline float64
 	}
 
@@ -770,6 +771,7 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		}
 		if msg.PublicRequest != nil {
 			entry.requestID = msg.PublicRequest.ReqID()
+			entry.requestToken = msg.RequestToken
 			entry.requestDeadline = float64(msg.PublicRequest.ReqDeadline())
 		}
 		entries = append(entries, entry)
@@ -788,7 +790,7 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 				continue
 			}
 			var token string
-			if v, ok := r.claimTokens.Load(entry.requestID); ok {
+			if v, ok := r.claimTokens.Load(claimKey(entry.requestID, entry.requestToken)); ok {
 				if h, ok := v.(*claimHandle); ok {
 					token = h.token
 				}
@@ -801,8 +803,8 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 				logger.V(logutil.DEFAULT).Error(err, "Failed to renew claim for retried request", "id", entry.requestID)
 				continue
 			}
-			if res == -1 {
-				r.claimTokens.Delete(entry.requestID)
+			if res != 1 {
+				r.claimTokens.Delete(claimKey(entry.requestID, entry.requestToken))
 			}
 		}
 		logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
@@ -873,7 +875,7 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 		var ok bool
 		err := retryRedisOp(ctx, func(ctx context.Context) error {
 			var aerr error
-			ok, aerr = r.ackResult(ctx, claimQueue, resultQueue, result.ID, r.marshalResult(result), listTTL)
+			ok, aerr = r.ackResult(ctx, claimQueue, resultQueue, result.ID, result.Routing.RequestToken, r.marshalResult(result), listTTL)
 			return aerr
 		})
 		if err != nil {
