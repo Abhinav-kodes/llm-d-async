@@ -213,7 +213,6 @@ func (o *Options) synthesizeRedisSortedSetConfig() ([]byte, error) {
 		EnableTracing:          o.Observability.RedisTracing,
 		ClaimLeaseTTLSeconds:   int64(o.Transport.ClaimLeaseTTL / time.Second),
 		ClaimReclaimIntervalMs: int64(o.Transport.ClaimReclaimInterval / time.Millisecond),
-		ResultDedupTTLSeconds:  int64(o.Transport.ResultDedupTTL / time.Second),
 		Queues:                 queues,
 	}
 	data, err := json.Marshal(cfg)

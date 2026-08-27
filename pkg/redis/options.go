@@ -94,11 +94,8 @@ type SortedSetConfig struct {
 	ClaimLeaseTTLSeconds int64 `json:"claim_lease_ttl_seconds,omitempty"`
 	// ClaimReclaimIntervalMs is how often expired claims are scanned for
 	// redelivery.
-	ClaimReclaimIntervalMs int64 `json:"claim_reclaim_interval_ms,omitempty"`
-	// ResultDedupTTLSeconds is the lifetime of per-request terminal-result
-	// markers that collapse duplicate records under at-least-once delivery.
-	ResultDedupTTLSeconds int64                  `json:"result_dedup_ttl_seconds,omitempty"`
-	Queues                []SortedSetQueueConfig `json:"queues"`
+	ClaimReclaimIntervalMs int64                  `json:"claim_reclaim_interval_ms,omitempty"`
+	Queues                 []SortedSetQueueConfig `json:"queues"`
 }
 
 // LoadSortedSetConfig parses, applies env overrides/defaults, and validates a SortedSetConfig.
@@ -139,16 +136,12 @@ func (c *SortedSetConfig) ApplyDefaults() {
 	}
 	// Durable-dequeue defaults: a 5-minute lease comfortably exceeds
 	// typical inference latencies while keeping crash redelivery bounded;
-	// claims are scanned every 15s; terminal markers outlive typical batch
-	// jobs by hours so late duplicate deliveries collapse silently.
+	// claims are scanned every 15s.
 	if c.ClaimLeaseTTLSeconds == 0 {
 		c.ClaimLeaseTTLSeconds = 300
 	}
 	if c.ClaimReclaimIntervalMs == 0 {
 		c.ClaimReclaimIntervalMs = 15000
-	}
-	if c.ResultDedupTTLSeconds == 0 {
-		c.ResultDedupTTLSeconds = 21600 // 6h
 	}
 	for i := range c.Queues {
 		if c.Queues[i].RequestPathURL == "" {

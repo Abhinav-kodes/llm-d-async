@@ -46,7 +46,6 @@ type TransportOptions struct {
 	// transport; ignored when a transport config file supplies its own values.
 	ClaimLeaseTTL        time.Duration
 	ClaimReclaimInterval time.Duration
-	ResultDedupTTL       time.Duration
 }
 
 type ObservabilityConfig struct {
@@ -112,7 +111,6 @@ func NewOptions() *Options {
 				BacklogPollInterval:  15 * time.Second,
 				ClaimLeaseTTL:        5 * time.Minute,
 				ClaimReclaimInterval: 15 * time.Second,
-				ResultDedupTTL:       6 * time.Hour,
 			},
 			Observability: ObservabilityConfig{
 				Verbosity: logging.DEFAULT,
@@ -156,7 +154,6 @@ func (o *Options) AddFlags(fs *pflag.FlagSet) {
 	// fields there instead.
 	fs.DurationVar(&o.Transport.ClaimLeaseTTL, "claim-lease-ttl", o.Transport.ClaimLeaseTTL, "how long a dequeued request's claim survives before another instance redelivers it; should exceed the longest inference plus drain time (redis-sortedset only)")
 	fs.DurationVar(&o.Transport.ClaimReclaimInterval, "claim-reclaim-interval", o.Transport.ClaimReclaimInterval, "how often expired claims are scanned and redelivered (redis-sortedset only)")
-	fs.DurationVar(&o.Transport.ResultDedupTTL, "result-dedup-ttl", o.Transport.ResultDedupTTL, "how long per-request dedup markers are kept so redelivered requests cannot emit a second terminal result (redis-sortedset only)")
 
 	// Deprecated: use --transport / --transport-config instead. Retained for backwards compatibility.
 	fs.StringVar(&o.MessageQueueImpl, "message-queue-impl", o.MessageQueueImpl, "Deprecated: use --transport. The message queue implementation to use. Supported implementations: redis-pubsub, redis-sortedset, gcp-pubsub, gcp-pubsub-gated")

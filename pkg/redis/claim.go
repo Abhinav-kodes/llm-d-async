@@ -164,13 +164,12 @@ func newClaimToken() (string, error) {
 }
 
 // claimHandle is what this instance tracks per in-flight request: the
-// ownership proof plus everything the heartbeater and shutdown sweep need to
-// renew or hand back the claim without re-reading Redis state.
+// ownership proof plus everything the heartbeater needs to renew the claim
+// without re-reading Redis state.
 type claimHandle struct {
-	token        string
-	queue        string
-	deadline     float64
-	requestToken string
+	token    string
+	queue    string
+	deadline float64
 }
 
 // claimExpiry computes the lease deadline for a request claimed now: the
@@ -310,7 +309,7 @@ func (r *RedisSortedSetFlow) reclaimExpiredClaims(ctx context.Context) (released
 				logger.V(logutil.DEBUG).Info("Reclaimed expired claim, redelivering", "id", id, "queue", queueName)
 			}
 		}
-		if depth, err := r.rdb.HLen(ctx, keys.claimed).Result(); err == nil {
+		if depth, err := r.rdb.ZCard(ctx, keys.idx).Result(); err == nil {
 			metrics.SetClaimDepth(float64(depth), ch.queueID, queueName, r.poolNameFor(ch.queueID))
 		}
 	}
