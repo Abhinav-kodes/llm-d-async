@@ -784,31 +784,41 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		}
 		_, err := pipe.Exec(ctx)
 		return err
-	}); err == nil {
+	}); err != nil {
+		// Persistence failed after retries — stop heartbeating so the
+		// lease can expire and the request is redelivered via reclaim
+		// instead of being orphaned forever.
 		for _, entry := range entries {
-			if entry.requestID == "" {
-				continue
-			}
-			var token string
-			if v, ok := r.claimTokens.Load(claimKey(entry.requestID, entry.requestToken)); ok {
-				if h, ok := v.(*claimHandle); ok {
-					token = h.token
-				}
-			}
-			if token == "" {
-				continue
-			}
-			res, err := r.renewClaim(ctx, entry.originQueue, entry.requestID, entry.requestDeadline, token)
-			if err != nil {
-				logger.V(logutil.DEFAULT).Error(err, "Failed to renew claim for retried request", "id", entry.requestID)
-				continue
-			}
-			if res != 1 {
+			if entry.requestID != "" {
 				r.claimTokens.Delete(claimKey(entry.requestID, entry.requestToken))
 			}
 		}
-		logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
+		logger.V(logutil.DEFAULT).Error(err, "Failed to push retry batch, claim released for redelivery", "batchSize", len(batch))
+		return
 	}
+	for _, entry := range entries {
+		if entry.requestID == "" {
+			continue
+		}
+		var token string
+		if v, ok := r.claimTokens.Load(claimKey(entry.requestID, entry.requestToken)); ok {
+			if h, ok := v.(*claimHandle); ok {
+				token = h.token
+			}
+		}
+		if token == "" {
+			continue
+		}
+		res, err := r.renewClaim(ctx, entry.originQueue, entry.requestID, entry.requestDeadline, token)
+		if err != nil {
+			logger.V(logutil.DEFAULT).Error(err, "Failed to renew claim for retried request", "id", entry.requestID)
+			continue
+		}
+		if res != 1 {
+			r.claimTokens.Delete(claimKey(entry.requestID, entry.requestToken))
+		}
+	}
+	logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
 }
 
 // Pushes results to Redis list (FIFO)
@@ -879,7 +889,10 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 			return aerr
 		})
 		if err != nil {
-			logger.V(logutil.DEFAULT).Error(err, "Failed to flush result", "id", result.ID)
+			// Redis down after retries — drop handle so lease expires and
+			// request is redelivered, instead of heartbeating forever.
+			r.claimTokens.Delete(claimKey(result.ID, result.Routing.RequestToken))
+			logger.V(logutil.DEFAULT).Error(err, "Failed to flush result, claim released for redelivery", "id", result.ID)
 			continue
 		}
 		if !ok {
