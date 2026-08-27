@@ -91,10 +91,8 @@ type RedisSortedSetFlow struct {
 
 	// Durable-dequeue state and tuning knobs.
 	claimTokens          sync.Map // ownership token per in-flight request
-	retryOwned           sync.Map // ids parked in the retry queue; sweep skips them
 	claimLeaseTTL        time.Duration
 	claimReclaimInterval time.Duration
-	resultDedupTTL       time.Duration
 }
 
 type redisCancellationChecker struct {
@@ -138,8 +136,7 @@ func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoo
 		gateFactory:            gateFactory,
 		enableTracing:          cfg.EnableTracing,
 		claimLeaseTTL:          time.Duration(cfg.ClaimLeaseTTLSeconds) * time.Second,
-		claimReclaimInterval:   time.Duration(cfg.ClaimReclaimIntervalMs) * time.Millisecond,
-		resultDedupTTL:         time.Duration(cfg.ResultDedupTTLSeconds) * time.Second,
+		claimReclaimInterval: time.Duration(cfg.ClaimReclaimIntervalMs) * time.Millisecond,
 	}
 
 	if r.enableTracing {
@@ -279,15 +276,11 @@ func (r *RedisSortedSetFlow) Shutdown() {
 	if r.drainCancel != nil {
 		r.drainCancel()
 	}
-	// Drain first: final result flushes must ack before anything is swept.
 	r.drainWg.Wait()
 	if r.hbCancel != nil {
 		r.hbCancel()
 	}
 	r.hbWg.Wait()
-	if n := r.sweepUnackedClaims(context.Background()); n > 0 {
-		log.FromContext(context.Background()).Info("Swept unacked claims back to pending", "count", n)
-	}
 }
 
 func (r *RedisSortedSetFlow) RequestChannels() []pipeline.RequestChannel {
@@ -790,17 +783,27 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		_, err := pipe.Exec(ctx)
 		return err
 	}); err == nil {
-		// Renew + mark retryOwned so neither the reclaimer nor the shutdown
-		// sweep touches a request that is merely waiting out its backoff.
 		for _, entry := range entries {
 			if entry.requestID == "" {
 				continue
 			}
-			if err := r.renewClaim(ctx, entry.originQueue, entry.requestID, entry.requestDeadline); err != nil {
+			var token string
+			if v, ok := r.claimTokens.Load(entry.requestID); ok {
+				if h, ok := v.(*claimHandle); ok {
+					token = h.token
+				}
+			}
+			if token == "" {
+				continue
+			}
+			res, err := r.renewClaim(ctx, entry.originQueue, entry.requestID, entry.requestDeadline, token)
+			if err != nil {
 				logger.V(logutil.DEFAULT).Error(err, "Failed to renew claim for retried request", "id", entry.requestID)
 				continue
 			}
-			r.retryOwned.Store(entry.requestID, struct{}{})
+			if res == -1 {
+				r.claimTokens.Delete(entry.requestID)
+			}
 		}
 		logger.V(logutil.DEBUG).Info("Pushed retry batch", "batchSize", len(batch))
 	}
@@ -865,10 +868,8 @@ func (r *RedisSortedSetFlow) flushResultBatch(ctx context.Context, batch []api.R
 			claimQueue = resultQueue
 		}
 
-		// Ack atomically pushes the record, writes the terminal dedup marker,
-		// and drops this instance's claim. A request redelivered after
-		// a crash finds the marker already present and its duplicate record
-		// collapses to a no-op, so exactly one terminal record survives.
+		// Ack atomically pushes the record and drops this instance's claim
+		// only if it still owns the lease; stale owners are fenced.
 		var ok bool
 		err := retryRedisOp(ctx, func(ctx context.Context) error {
 			var aerr error

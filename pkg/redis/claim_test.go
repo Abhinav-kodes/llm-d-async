@@ -25,7 +25,6 @@ func newClaimTestFlow(t *testing.T) (*miniredis.Miniredis, *redis.Client, contex
 		batchSize:            10,
 		claimLeaseTTL:        200 * time.Millisecond,
 		claimReclaimInterval: 50 * time.Millisecond,
-		resultDedupTTL:       time.Minute,
 		requestChannels:      []requestChannelData{{queueName: "q", queueID: "q"}},
 	}
 	return s, rdb, context.Background(), flow
@@ -157,11 +156,14 @@ func TestAckResult_PushesOnceThenSuppressesDuplicates(t *testing.T) {
 		t.Fatalf("first ack: pushed=%v err=%v", pushed, err)
 	}
 	pushed, err = flow.ackResult(ctx, "q", "results", "c1", `{"id":"c1"}`, 0)
-	if err != nil || pushed {
-		t.Fatalf("duplicate ack: pushed=%v err=%v, want false/nil", pushed, err)
+	// Without a dedup marker, same-instance retry after a successful ack has
+	// no owner to fence against, so it will push again (at-least-once). The
+	// caller is responsible for not retrying a successful ack.
+	if err != nil || !pushed {
+		t.Fatalf("second ack (no marker, no owner): pushed=%v err=%v, want true/nil", pushed, err)
 	}
-	if n, _ := rdb.LLen(ctx, "results").Result(); n != 1 {
-		t.Fatalf("result list len = %d, want 1 (duplicate suppressed)", n)
+	if n, _ := rdb.LLen(ctx, "results").Result(); n != 2 {
+		t.Fatalf("result list len = %d, want 2 (no marker, duplicate allowed)", n)
 	}
 	// Ack must drop the claim so the reclaimer never redelivers it — both
 	// the payload and the companion score field.
@@ -184,11 +186,14 @@ func TestAckResult_StaleTokenLeavesForeignClaimIntact(t *testing.T) {
 	rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(time.Hour).Unix()), Member: "c1"})
 
 	pushed, err := flow.ackResult(ctx, "q", "results", "c1", `{"id":"c1"}`, 0)
-	if err != nil || !pushed {
-		t.Fatalf("ack: pushed=%v err=%v", pushed, err)
+	if err != nil || pushed {
+		t.Fatalf("stale ack should be fenced: pushed=%v err=%v", pushed, err)
 	}
 	if exists, _ := rdb.HExists(ctx, keys.claimed, "c1").Result(); !exists {
-		t.Fatal("ack dropped a foreign instance's claim")
+		t.Fatal("fenced ack dropped a foreign instance's claim")
+	}
+	if n, _ := rdb.LLen(ctx, "results").Result(); n != 0 {
+		t.Fatalf("fenced ack pushed result, len=%d want 0", n)
 	}
 }
 
@@ -245,7 +250,13 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 	// Grow the lease so the renewal lands in a later whole-second bucket
 	// (lease scores are unix seconds; same-second rewrites would compare equal).
 	flow.claimLeaseTTL = time.Hour
-	if err := flow.renewClaim(ctx, "q", "c1", float64(testDeadline)); err != nil {
+	var c1Token string
+	if v, ok := flow.claimTokens.Load("c1"); ok {
+		if h, ok := v.(*claimHandle); ok {
+			c1Token = h.token
+		}
+	}
+	if _, err := flow.renewClaim(ctx, "q", "c1", float64(testDeadline), c1Token); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
 	after, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, "c1").Result()
@@ -253,9 +264,11 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 		t.Fatalf("lease not extended: before=%f after=%f", before, after)
 	}
 
-	// Renewing an unknown request must be a clean no-op.
-	if err := flow.renewClaim(ctx, "q", "ghost", float64(testDeadline)); err != nil {
+	// Renewing an unknown request must be a clean no-op (returns 0, no error).
+	if res, err := flow.renewClaim(ctx, "q", "ghost", float64(testDeadline), "ghost-token"); err != nil {
 		t.Fatalf("renew ghost returned error: %v", err)
+	} else if res != 0 {
+		t.Fatalf("ghost renewal should return 0, got %d", res)
 	}
 	if _, err := rdb.ZScore(ctx, newClaimKeys("q").idx, "ghost").Result(); err != redis.Nil {
 		t.Fatalf("ghost renewal created an index entry (err=%v)", err)
@@ -304,49 +317,4 @@ func TestHeartbeatClaims_ExtendsLiveLeases(t *testing.T) {
 	}
 }
 
-func TestSweepUnackedClaims_HandsBackAllButRetryOwned(t *testing.T) {
-	_, rdb, ctx, flow := newClaimTestFlow(t)
 
-	mk := func(id string, score float64) (*api.InternalRequest, string) {
-		ir, member := claimEnvelope(t, id, testDeadline)
-		if err := rdb.ZAdd(ctx, "q", redis.Z{Score: score, Member: member}).Err(); err != nil {
-			t.Fatal(err)
-		}
-		return ir, member
-	}
-	irA, memberA := mk("sweep-a", testScore)
-	if _, ok, err := flow.claimRequest(ctx, "q", irA, memberA, float64(testDeadline), testScore); !ok || err != nil {
-		t.Fatalf("claim a: ok=%v err=%v", ok, err)
-	}
-	irB, memberB := mk("keep-b", testScore+5)
-	if _, ok, err := flow.claimRequest(ctx, "q", irB, memberB, float64(testDeadline), testScore+5); !ok || err != nil {
-		t.Fatalf("claim b: ok=%v err=%v", ok, err)
-	}
-	flow.retryOwned.Store("keep-b", struct{}{})
-
-	swept := flow.sweepUnackedClaims(ctx)
-	if swept != 1 {
-		t.Fatalf("swept = %d, want 1", swept)
-	}
-	score, err := rdb.ZScore(ctx, "q", memberA).Result()
-	if err != nil {
-		t.Fatalf("swept request not back in pending: %v", err)
-	}
-	if score != testScore {
-		t.Fatalf("restored score = %f, want original %v", score, testScore)
-	}
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "sweep-a").Result(); exists {
-		t.Fatal("swept claim still present")
-	}
-	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "keep-b").Result(); !exists {
-		t.Fatal("retry-owned claim was swept")
-	}
-	if _, ok := flow.claimTokens.Load("sweep-a"); ok {
-		t.Fatal("local token entry for swept claim not dropped")
-	}
-
-	// Sweeping again is a clean no-op: nothing unaccounted remains.
-	if n := flow.sweepUnackedClaims(ctx); n != 0 {
-		t.Fatalf("second sweep returned %d, want 0", n)
-	}
-}

@@ -24,10 +24,10 @@ import (
 // persistence (AOF/replication). See docs/guides/durable-dequeue.md.
 
 const (
-	// reclaimGraceAfterDeadline extends leases slightly past the request
-	// deadline so a claim never expires into an already-expired request; the
-	// deadline-exceeded path then terminates it deterministically.
-	reclaimGraceAfterDeadline = 30 * time.Second
+	// reclaimGraceAfterDeadline extends leases past the request deadline
+	// so a claim never expires into an already-expired request; it must
+	// exceed the worker's request timeout to avoid racing real results.
+	reclaimGraceAfterDeadline = 5 * time.Minute
 
 	// reclaimBatchSize bounds how many expired claims one reclaimer pass
 	// releases, keeping each tick's Redis work bounded under backlog.
@@ -52,12 +52,6 @@ func newClaimKeys(queueName string) claimKeys {
 		owners:  queueName + ":claim-owners",
 		idx:     queueName + ":claims-idx",
 	}
-}
-
-// terminalKey returns the dedup marker guarding against duplicate result
-// records when at-least-once redelivery lets two owners finish one request.
-func terminalKey(requestID string) string {
-	return "result-terminal:" + requestID
 }
 
 // CLAIM moves one member from pending to claimed. Returns 0 when another
@@ -93,37 +87,29 @@ redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
 `)
 
-// ACKRESULT records a terminal result and drops the claim atomically; the
-// dedup marker makes the record idempotent (first ack pushes, rest clean up).
+// ACKRESULT records a terminal result and drops the claim atomically.
+// Only the current owner may publish; stale owners are fenced. If no claim
+// exists (direct result push without prior claim, e.g., tests), the push
+// is allowed.
 //
-// KEYS: marker, resultList, claimed, owners, idx
-// ARGV: id, resultJSON, markerTTLSeconds, listTTLSeconds, token
-// Returns 1 when the result was recorded, 0 when suppressed as a duplicate.
+// KEYS: claimed, owners, idx, resultList
+// ARGV: id, resultJSON, token, listTTLSeconds
+// Returns 1 when the result was recorded, 0 when fenced as stale.
 var ackResultScript = redis.NewScript(`
-local pushed = 0
-if redis.call('EXISTS', KEYS[1]) == 0 then
-  redis.call('LPUSH', KEYS[2], ARGV[2])
-  local listTTL = tonumber(ARGV[4])
-  if listTTL > 0 then
-    redis.call('EXPIRE', KEYS[2], listTTL)
-  end
-  local markerTTL = tonumber(ARGV[3])
-  if markerTTL > 0 then
-    redis.call('SETEX', KEYS[1], markerTTL, '1')
-  else
-    -- A zero/negative TTL means "unbounded"; plain SET avoids the invalid
-    -- expire error that SETEX raises for 0.
-    redis.call('SET', KEYS[1], '1')
-  end
-  pushed = 1
+local owner = redis.call('HGET', KEYS[2], ARGV[1])
+if owner and owner ~= ARGV[3] then
+  return 0
 end
-if redis.call('HGET', KEYS[4], ARGV[1]) == ARGV[5] then
-  redis.call('HDEL', KEYS[3], ARGV[1])
-  redis.call('HDEL', KEYS[3], ARGV[1] .. ':score')
-  redis.call('HDEL', KEYS[4], ARGV[1])
-  redis.call('ZREM', KEYS[5], ARGV[1])
+redis.call('LPUSH', KEYS[4], ARGV[2])
+local listTTL = tonumber(ARGV[4])
+if listTTL > 0 then
+  redis.call('EXPIRE', KEYS[4], listTTL)
 end
-return pushed
+redis.call('HDEL', KEYS[1], ARGV[1])
+redis.call('HDEL', KEYS[1], ARGV[1] .. ':score')
+redis.call('HDEL', KEYS[2], ARGV[1])
+redis.call('ZREM', KEYS[3], ARGV[1])
+return 1
 `)
 
 // RECLAIMIFEXPIRED redelivers an expired claim back to pending at its
@@ -153,10 +139,14 @@ redis.call('ZREM', KEYS[4], ARGV[1])
 return 1
 `)
 
-// RENEWCLAIM extends a live claim's lease (retry flusher). Not token-guarded;
-// worst case briefly extends a foreign lease, delaying reclaim by one TTL.
+// RENEWCLAIM extends a live claim's lease. Token-guarded: stale owners
+// cannot extend a claim they no longer own. Returns 1 on success, -1 on
+// token mismatch, 0 if no claim exists.
 var renewClaimScript = redis.NewScript(`
-if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then
+if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[3] then
+  if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
+    return -1
+  end
   return 0
 end
 redis.call('ZADD', KEYS[2], tonumber(ARGV[2]), ARGV[1])
@@ -173,13 +163,24 @@ func newClaimToken() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// terminalKey returns the dedup marker for a request generation. It is
+// namespaced by queue and token so ID reuse with a new token is not
+// suppressed, while crash redelivery (same token) is.
+func terminalKey(queueName, requestID, requestToken string) string {
+	if requestToken != "" {
+		return "result-terminal:" + queueName + ":" + requestID + ":" + requestToken
+	}
+	return "result-terminal:" + queueName + ":" + requestID
+}
+
 // claimHandle is what this instance tracks per in-flight request: the
 // ownership proof plus everything the heartbeater and shutdown sweep need to
 // renew or hand back the claim without re-reading Redis state.
 type claimHandle struct {
-	token    string
-	queue    string
-	deadline float64
+	token         string
+	queue         string
+	deadline    float64
+	requestToken string
 }
 
 // claimExpiry computes the lease deadline for a request claimed now: the
@@ -231,7 +232,6 @@ func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string,
 		return fmt.Errorf("release claim for %q on queue %q: %w", requestID, queueName, err)
 	}
 	r.claimTokens.Delete(requestID)
-	r.retryOwned.Delete(requestID)
 	return nil
 }
 
@@ -248,21 +248,18 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 		}
 	}
 	keys := newClaimKeys(claimQueueName)
-	markerTTL := int64(r.resultDedupTTL.Seconds())
 	listTTLSec := int64(0)
 	if listTTL > 0 {
 		listTTLSec = int64(listTTL.Seconds())
 	}
 	res, err := ackResultScript.Run(ctx, r.rdb, []string{
-		terminalKey(requestID), resultList, keys.claimed, keys.owners, keys.idx,
-	}, requestID, resultJSON, markerTTL, listTTLSec, token).Int()
+		keys.claimed, keys.owners, keys.idx, resultList,
+	}, requestID, resultJSON, token, listTTLSec).Int()
 	if err != nil {
 		return false, fmt.Errorf("ack result for %q: %w", requestID, err)
 	}
 	r.claimTokens.Delete(requestID)
-	r.retryOwned.Delete(requestID)
 	if res == 0 {
-		metrics.RecordDuplicateSuppressed()
 		return false, nil
 	}
 	return true, nil
@@ -270,14 +267,14 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 
 // renewClaim extends the lease of a request being sent to retry. Ownership is
 // retained across the backoff; the eventual terminal result acks and releases.
-func (r *RedisSortedSetFlow) renewClaim(ctx context.Context, queueName string, requestID string, deadline float64) error {
+func (r *RedisSortedSetFlow) renewClaim(ctx context.Context, queueName string, requestID string, deadline float64, token string) (int, error) {
 	keys := newClaimKeys(queueName)
-	err := renewClaimScript.Run(ctx, r.rdb, []string{keys.claimed, keys.idx},
-		requestID, r.claimExpiry(deadline)).Err()
+	res, err := renewClaimScript.Run(ctx, r.rdb, []string{keys.claimed, keys.idx, keys.owners},
+		requestID, r.claimExpiry(deadline), token).Int()
 	if err != nil {
-		return fmt.Errorf("renew claim for %q on queue %q: %w", requestID, queueName, err)
+		return 0, fmt.Errorf("renew claim for %q on queue %q: %w", requestID, queueName, err)
 	}
-	return nil
+	return res, nil
 }
 
 // reclaimExpiredClaims releases every claim whose lease has lapsed, returning
@@ -349,28 +346,6 @@ func (r *RedisSortedSetFlow) startReclaimer(ctx context.Context) {
 	}
 }
 
-// SWEEPHANDBACK returns a still-claimed request to pending at shutdown,
-// reading payload/score from the bookkeeping itself. Token-guarded.
-var sweepClaimScript = redis.NewScript(`
-if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[2] then
-  return 0
-end
-local payload = redis.call('HGET', KEYS[2], ARGV[1])
-local score = redis.call('HGET', KEYS[2], ARGV[1] .. ':score')
-redis.call('HDEL', KEYS[2], ARGV[1])
-redis.call('HDEL', KEYS[2], ARGV[1] .. ':score')
-redis.call('HDEL', KEYS[3], ARGV[1])
-redis.call('ZREM', KEYS[4], ARGV[1])
-if payload then
-  local sc = score
-  if not sc then
-    sc = ARGV[3]
-  end
-  redis.call('ZADD', KEYS[1], tonumber(sc), payload)
-  return 1
-end
-return 0
-`)
 
 // heartbeatInterval is how often live claims are renewed: a third of the
 // lease TTL, clamped so ticks are neither sub-second spam nor multi-minute
@@ -388,6 +363,8 @@ func (r *RedisSortedSetFlow) heartbeatInterval() time.Duration {
 
 // heartbeatClaims renews every held claim so slow-but-alive work is not
 // treated as dead. Acked/released ids leave the map and are skipped.
+// Token mismatch (-1) means the lease was taken over; local handles are
+// deleted to prevent deadlock and memory leak.
 func (r *RedisSortedSetFlow) heartbeatClaims(ctx context.Context) {
 	logger := log.FromContext(ctx)
 	r.claimTokens.Range(func(key, value any) bool {
@@ -396,8 +373,13 @@ func (r *RedisSortedSetFlow) heartbeatClaims(ctx context.Context) {
 		if !ok || h == nil || id == "" {
 			return true
 		}
-		if err := r.renewClaim(ctx, h.queue, id, h.deadline); err != nil {
+		res, err := r.renewClaim(ctx, h.queue, id, h.deadline, h.token)
+		if err != nil {
 			logger.V(logutil.DEBUG).Error(err, "Failed to renew claim lease", "id", id)
+			return true
+		}
+		if res == -1 {
+			r.claimTokens.Delete(id)
 		}
 		return true
 	})
@@ -419,34 +401,3 @@ func (r *RedisSortedSetFlow) startHeartbeat(ctx context.Context) {
 	}
 }
 
-// sweepUnackedClaims hands still-claimed requests back to pending at
-// shutdown (except retryOwned ones) instead of letting them wait out their
-// lease. Returns how many claims were swept.
-func (r *RedisSortedSetFlow) sweepUnackedClaims(ctx context.Context) int {
-	logger := log.FromContext(ctx)
-	swept := 0
-	r.claimTokens.Range(func(key, value any) bool {
-		id, _ := key.(string)
-		h, ok := value.(*claimHandle)
-		if !ok || h == nil || id == "" {
-			return true
-		}
-		if _, retried := r.retryOwned.Load(id); retried {
-			return true
-		}
-		keys := newClaimKeys(h.queue)
-		err := retryRedisOp(ctx, func(ctx context.Context) error {
-			return sweepClaimScript.Run(ctx, r.rdb, []string{
-				keys.pending, keys.claimed, keys.owners, keys.idx,
-			}, id, h.token, h.deadline).Err()
-		})
-		if err != nil {
-			logger.Error(err, "Failed to sweep claim on shutdown", "id", id, "queue", h.queue)
-			return true
-		}
-		r.claimTokens.Delete(id)
-		swept++
-		return true
-	})
-	return swept
-}

@@ -100,9 +100,6 @@ func TestSynthesizeRedisSortedSetConfig_SingleQueueGate(t *testing.T) {
 	if cfg.ClaimReclaimIntervalMs != 15000 {
 		t.Errorf("ClaimReclaimIntervalMs = %d, want 15000", cfg.ClaimReclaimIntervalMs)
 	}
-	if cfg.ResultDedupTTLSeconds != 21600 {
-		t.Errorf("ResultDedupTTLSeconds = %d, want 21600", cfg.ResultDedupTTLSeconds)
-	}
 
 	// The synthesized blob must satisfy the real loader end to end.
 	if _, err := redis.LoadSortedSetConfig(data); err != nil {

@@ -141,10 +141,6 @@ var (
 		Subsystem: SchedulerSubsystem, Name: "async_claims_expired_total",
 		Help: "Total number of claims whose lease expired and whose requests were redelivered to the queue (evidence of consumer crash or lease too short).",
 	}, queueLabels)
-	DuplicateSuppressed = prometheus.NewCounter(prometheus.CounterOpts{
-		Subsystem: SchedulerSubsystem, Name: "async_duplicate_results_suppressed_total",
-		Help: "Total number of duplicate result records collapsed by terminal markers under at-least-once delivery; each increment is one redelivered request whose work was already recorded.",
-	})
 )
 
 // Gate decision reason label values for async_gate_decisions_total.
@@ -453,11 +449,6 @@ func SetClaimDepth(n float64, queueID, queueName, poolName string) {
 	ClaimDepth.WithLabelValues(queueID, queueName, poolName).Set(n)
 }
 
-// RecordDuplicateSuppressed counts one duplicate result record collapsed by a
-// terminal marker.
-func RecordDuplicateSuppressed() {
-	DuplicateSuppressed.Inc()
-}
 
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
@@ -467,7 +458,7 @@ func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Colle
 		DeadlineProximity,
 		DispatchBudget, PoolWorkerLimit, GateDecisions,
 		GateMetricValue, GateMetricThreshold, GateMetricSourceAvailable,
-		ClaimDepth, ClaimsExpired, DuplicateSuppressed,
+		ClaimDepth, ClaimsExpired,
 	}
 	if supportsMessageLatency {
 		collectors = append(collectors, MessageLatencyTime)

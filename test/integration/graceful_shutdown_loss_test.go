@@ -148,12 +148,12 @@ func indexOf(s, substr string) int {
 	return -1
 }
 
-// TestGracefulShutdown_ZeroWorkers_RecoversAllPoppedRequests verifies the
-// shutdown sweep: with --concurrency 0 no workers exist, so claimed requests
-// strand in the merged channel and forwarder goroutine. Shutdown hands every
-// unacked claim back to pending immediately — no lease wait, nothing lost.
-func TestGracefulShutdown_ZeroWorkers_RecoversAllPoppedRequests(t *testing.T) {
-	flow, rdb, queue := newShutdownLossFlow(t, 0, "http://localhost:30800", 0, 0)
+// TestGracefulShutdown_ZeroWorkers_RecoversViaLeaseExpiry verifies that with
+// --concurrency 0 no workers exist, so claimed requests strand. Graceful
+// shutdown now stops heartbeating and lets the reclaimer redeliver after the
+// lease lapses (small slice: no immediate sweep).
+func TestGracefulShutdown_ZeroWorkers_RecoversViaLeaseExpiry(t *testing.T) {
+	flow, rdb, queue := newShutdownLossFlow(t, 0, "http://localhost:30800", 1, 100)
 
 	pools := map[string]pipeline.WorkerPoolConfig{
 		"default": {ID: "default", Workers: 0},
@@ -174,14 +174,25 @@ func TestGracefulShutdown_ZeroWorkers_RecoversAllPoppedRequests(t *testing.T) {
 	waitUntil(t, 5*time.Second, func() bool { return len(mergedChannel) == 1 })
 	time.Sleep(200 * time.Millisecond)
 
-	// Graceful shutdown, exactly as runner.go does it. The sweep inside
-	// Shutdown must return the stranded claims to the pending set.
 	flow.StopConsuming()
 	flow.Shutdown()
 
+	// Graceful shutdown stops heartbeating; without a sweep, stranded
+	// claims must be reclaimed by a survivor. Start a fresh instance to
+	// drive the reclaimer and verify redelivery.
+	replacement := newFlowOnSameRedis(t, rdb, "http://localhost:30800", 1, 100)
+	replacement.Start(context.Background())
+	defer func() {
+		replacement.StopConsuming()
+		replacement.Shutdown()
+	}()
+	waitUntil(t, 5*time.Second, func() bool {
+		n, _ := redisAccounting(t, rdb, ids)
+		return n == len(ids)
+	})
 	accounted, detail := redisAccounting(t, rdb, ids)
 	assert.Equal(t, len(ids), accounted,
-		"graceful shutdown with the sweep must recover every popped request; recoverable: %s", detail)
+		"graceful shutdown via lease expiry must recover every popped request; recoverable: %s", detail)
 }
 
 // TestGracefulShutdown_WithWorkers_RecoversViaRetryQueue is the control: with

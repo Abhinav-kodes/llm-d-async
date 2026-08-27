@@ -30,36 +30,38 @@ Dequeue is now **peek → claim → ack**:
      (`min(claim_lease_ttl, deadline + 30s)`).
 3. **Process as before** — claimed requests flow through the same channels,
    merge policy, and workers. No downstream change.
-4. **Ack** — when a terminal result is flushed, one Lua script pushes the
-   record to the result list, writes a `result-terminal:<id>` dedup marker,
-   and drops the claim — atomically. A crash between "inference done" and
-   "result written" therefore redelivers the request instead of losing it.
+4. **Ack** — when a terminal result is flushed, one Lua script checks
+   `owners[id]==claimToken`, pushes the record, and drops the claim —
+   atomically. Stale owners are fenced and cannot publish. A crash between
+   "inference done" and "result written" therefore redelivers the request
+   instead of losing it. The request-generation identity is `RequestToken`
+   (fresh per enqueue), so ID reuse with a new token is not suppressed.
 
 While a request is held, a background **heartbeater** renews its lease every
-`claim_lease_ttl / 3` (clamped to 1s–30s), so slow-but-healthy inference is
-never mistaken for a dead owner. The lease TTL is therefore the crash
-*detection* window, not a processing-time budget.
+`claim_lease_ttl / 3` (clamped to 1s–30s) with token fencing — stale owners
+cannot extend a lease they no longer own. The lease TTL is therefore the
+crash *detection* window, not a processing-time budget. Graceful shutdown
+simply stops heartbeating; unacked claims are then redelivered via the same
+lease-expiry path.
 
 Every exit path is paired with exactly one claim outcome:
 
 | Path | Claim outcome |
 |---|---|
-| Result produced (success/error/cancelled/deadline/drop) | acked after the record is durably pushed |
-| Request parked for retry | lease renewed; shielded from the shutdown sweep |
+| Result produced (success/error/cancelled/deadline/drop) | acked after the record is durably pushed (fenced) |
+| Request parked for retry | lease renewed (fenced) while it waits |
 | Consumer context cancelled mid-hand-off | released back to pending at its original sort score |
-| Graceful shutdown with unacked claims | swept back to pending immediately (except retry-owned) |
-| Owner dies (lease expires) | reclaimer redelivers to pending; another instance picks it up |
+| Owner dies or graceful shutdown stops heartbeating | reclaimer redelivers after lease expiry; another instance picks it up |
 | Gate refuses / gate error | no claim was taken; entry simply stays pending |
 
 ## Delivery guarantees
 
 - **At-least-once execution**: a request whose owner crashed is re-run by the
   survivor. Expensive inference may execute twice across a failure.
-- **Exactly-once terminal records**: the `result-terminal:<id>` marker makes
-  duplicate results collapse — only the first ack pushes a record; later ones
-  clean up their claim and no-op. Consumers observe one terminal record per
-  accepted request, keyed by the internal request ID (`custom_id` is
-  user-supplied and deliberately not used).
+- **Exactly-once terminal records**: only the current lease owner may
+  publish; stale completions are fenced (`owners[id]==claimToken`). Consumers
+  observe one terminal record per accepted request-generation (`ID+RequestToken`,
+  `custom_id` stays out of it).
 - Ordering within a queue remains earliest-deadline-first; release and
   redelivery restore the original sort score.
 
@@ -67,37 +69,39 @@ Every exit path is paired with exactly one claim outcome:
 
 | Flag | Config JSON field | Default | Meaning |
 |---|---|---|---|
-| `--claim-lease-ttl` | `claim_lease_ttl_seconds` | `300` | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. |
+| `--claim-lease-ttl` | `claim_lease_ttl_seconds` | `300` | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. Must exceed the longest inference plus drain time. |
 | `--claim-reclaim-interval` | `claim_reclaim_interval_ms` | `15000` | How often expired claims are scanned for redelivery. This bounds how long a crashed instance's work stalls. |
-| `--result-dedup-ttl` | `result_dedup_ttl_seconds` | `21600` | Lifetime of per-request dedup markers; must exceed the longest possible redelivery chain. |
 
 The heartbeat interval is derived (`lease TTL / 3`, clamped to 1s–30s) and is
 not separately configurable. Flags apply to the redis-sortedset transport and
 are ignored when `--transport-config`/`--transport-config-file` supplies its
 own values.
 
-Metrics: `async_claim_depth` (claimed per queue), `async_claims_expired_total`
-(redeliveries — spikes indicate crashes or too-short leases),
-`async_duplicate_results_suppressed_total` (duplicate records collapsed).
+Metrics: `async_claim_depth` (claimed per queue, via `ZCard(claims-idx)`),
+`async_claims_expired_total` (redeliveries — spikes indicate crashes or
+too-short leases). Richer per-result dedup metrics can follow once the core
+path is proven.
 
 ## Operational requirements
 
-- **Redis persistence is part of the durability contract.** Claims, dedup
-  markers, and queued requests all live in Redis; run it with AOF (`appendonly
+- **Redis persistence is part of the durability contract.** Claims and
+  queued requests live in Redis; run it with AOF (`appendonly
   yes`, e.g. `appendfsync everysec`) and/or replication. Without persistence a
   Redis restart reintroduces a loss window this feature cannot close.
 - Multiple Async replicas may share one queue: atomic claims prevent double
   dispatch, and lease expiry hands work over automatically when a replica
   disappears.
-- Rolling upgrades are safe: pending members are unchanged, so old-version and
-  new-version pods can interleave during rollout (entries popped by old pods
-  do not get claim protection).
+- Rolling upgrades are safe for the pending format, but during the mixed-fleet
+  window old instances still run destructive `ZPOPMIN` and can still lose
+  requests until the rollout completes.
 
 ## Known limitations
 
-- Heartbeats are not token-guarded: in the rare window after a lease lapse
-  and takeover, the old owner's final heartbeat can extend the new owner's
-  claim by at most one TTL, slightly delaying the next reclaim.
-- Graceful shutdown hands unacked claims back to pending but cannot return
-  requests held inside plugin goroutines that ignore context cancellation;
-  those wait out their lease like hard-kill losses.
+- Graceful shutdown now relies on lease expiry like hard-kill; unacked work
+  waits out its remaining lease instead of being handed back immediately. An
+  immediate handback can be added as a follow-up once the core path is proven.
+- If a crash occurs while a request sits in the retry queue, the reclaimer
+  may redeliver the original claimed payload while the retry-queue copy
+  re-enters pending via the mover — at-most one extra pending entry, bounded
+  and collapsed to one execution by claim fencing. This will be documented as
+  a trade-off and addressed with a unified retry/claim lifecycle later.
