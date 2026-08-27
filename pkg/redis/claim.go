@@ -19,8 +19,8 @@ import (
 //
 // Requests leave the pending zset only when claimed under a lease; the claim
 // is dropped exactly once per terminal outcome (ack, release, or expiry
-// redelivery). Delivery is at-least-once across crashes; a per-request
-// marker collapses duplicate results to exactly one record. Requires Redis
+// redelivery). Delivery is at-least-once across crashes; only the current
+// lease owner may ack, so stale completions are fenced. Requires Redis
 // persistence (AOF/replication). See docs/guides/durable-dequeue.md.
 
 const (
@@ -161,16 +161,6 @@ func newClaimToken() (string, error) {
 		return "", fmt.Errorf("generate claim token: %w", err)
 	}
 	return hex.EncodeToString(buf), nil
-}
-
-// terminalKey returns the dedup marker for a request generation. It is
-// namespaced by queue and token so ID reuse with a new token is not
-// suppressed, while crash redelivery (same token) is.
-func terminalKey(queueName, requestID, requestToken string) string {
-	if requestToken != "" {
-		return "result-terminal:" + queueName + ":" + requestID + ":" + requestToken
-	}
-	return "result-terminal:" + queueName + ":" + requestID
 }
 
 // claimHandle is what this instance tracks per in-flight request: the

@@ -105,3 +105,7 @@ path is proven.
   re-enters pending via the mover — at-most one extra pending entry, bounded
   and collapsed to one execution by claim fencing. This will be documented as
   a trade-off and addressed with a unified retry/claim lifecycle later.
+- No delivery counter or dead-letter queue: redelivery is bounded by each
+  request's deadline — once it passes, the deadline-exceeded path produces the
+  terminal record. Projects like asynq cap attempts and archive instead; here
+  the deadline plays that role for batch workloads.
