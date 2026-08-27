@@ -167,9 +167,9 @@ func newClaimToken() (string, error) {
 // ownership proof plus everything the heartbeater and shutdown sweep need to
 // renew or hand back the claim without re-reading Redis state.
 type claimHandle struct {
-	token         string
-	queue         string
-	deadline    float64
+	token        string
+	queue        string
+	deadline     float64
 	requestToken string
 }
 
@@ -336,7 +336,6 @@ func (r *RedisSortedSetFlow) startReclaimer(ctx context.Context) {
 	}
 }
 
-
 // heartbeatInterval is how often live claims are renewed: a third of the
 // lease TTL, clamped so ticks are neither sub-second spam nor multi-minute
 // gaps.
@@ -390,4 +389,3 @@ func (r *RedisSortedSetFlow) startHeartbeat(ctx context.Context) {
 		}
 	}
 }
-

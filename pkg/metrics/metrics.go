@@ -449,7 +449,6 @@ func SetClaimDepth(n float64, queueID, queueName, poolName string) {
 	ClaimDepth.WithLabelValues(queueID, queueName, poolName).Set(n)
 }
 
-
 // GetCollectors returns all custom collectors for the async processor.
 func GetAsyncProcessorCollectors(supportsMessageLatency bool) []prometheus.Collector {
 	collectors := []prometheus.Collector{

@@ -136,7 +136,7 @@ func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoo
 		gateFactory:            gateFactory,
 		enableTracing:          cfg.EnableTracing,
 		claimLeaseTTL:          time.Duration(cfg.ClaimLeaseTTLSeconds) * time.Second,
-		claimReclaimInterval: time.Duration(cfg.ClaimReclaimIntervalMs) * time.Millisecond,
+		claimReclaimInterval:   time.Duration(cfg.ClaimReclaimIntervalMs) * time.Millisecond,
 	}
 
 	if r.enableTracing {

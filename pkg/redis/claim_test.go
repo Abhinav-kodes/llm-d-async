@@ -316,5 +316,3 @@ func TestHeartbeatClaims_ExtendsLiveLeases(t *testing.T) {
 		t.Fatalf("lease not meaningfully extended: before=%f after=%f", before, after)
 	}
 }
-
-
