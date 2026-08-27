@@ -129,7 +129,8 @@ return 1
 
 // RENEWCLAIM extends a live claim's lease. Token-guarded: stale owners
 // cannot extend a claim they no longer own. Returns 1 on success, -1 on
-// token mismatch, 0 if no claim exists.
+// token mismatch, 0 if no claim exists. Verified via HGET owners vs token
+// — old replica heartbeat after takeover gets -1 and deletes local handle.
 var renewClaimScript = redis.NewScript(`
 if redis.call('HGET', KEYS[3], ARGV[1]) ~= ARGV[3] then
   if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 1 then
@@ -193,6 +194,10 @@ func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string,
 		return "", false, err
 	}
 	keys := newClaimKeys(queueName)
+	// Redis field is ReqID only; local map is generation-scoped
+	// claimKey(ID+RequestToken) so old result cannot borrow new token —
+	// concurrent same ID with different token never happens in current
+	// batch flow (sequential reuse after ack), see claimKey.
 	reqID := ir.PublicRequest.ReqID()
 	reqToken := ir.RequestToken
 	res, err := claimScript.Run(ctx, r.rdb, []string{
