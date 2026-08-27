@@ -230,13 +230,13 @@ func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoo
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	logger := log.FromContext(ctx)
-	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(ctx, logger))
 	r.consumeCancel = consumeCancel
 
-	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(ctx, logger))
 	r.drainCancel = drainCancel
 
-	hbCtx, hbCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
+	hbCtx, hbCancel := context.WithCancel(log.IntoContext(ctx, logger))
 	r.hbCancel = hbCancel
 
 	for _, ch := range r.requestChannels {
