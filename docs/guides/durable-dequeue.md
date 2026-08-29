@@ -94,8 +94,8 @@ Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclai
 - If a crash occurs while a request sits in the retry queue, the reclaimer
   may redeliver the original claimed payload while the retry-queue copy
   re-enters pending via the mover — at-most one extra pending entry, bounded
-  and collapsed to one execution by claim fencing. This will be documented as
-  a trade-off and addressed with a unified retry/claim lifecycle later.
+  and collapsed to one execution by claim fencing. This is a known trade-off
+  to be addressed with a unified retry/claim lifecycle.
 - No delivery counter or dead-letter queue: redelivery is bounded by each
   request's deadline — once it passes, the deadline-exceeded path produces the
   terminal record. Projects like asynq cap attempts and archive instead; here
