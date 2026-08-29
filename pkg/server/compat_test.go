@@ -94,14 +94,9 @@ func TestSynthesizeRedisSortedSetConfig_SingleQueueGate(t *testing.T) {
 	if q.GateParams["threshold"] != 0.7 {
 		t.Errorf("GateParams[threshold] = %v, want 0.7", q.GateParams["threshold"])
 	}
-	if cfg.ClaimLeaseTTLSeconds != 300 {
-		t.Errorf("ClaimLeaseTTLSeconds = %d, want 300", cfg.ClaimLeaseTTLSeconds)
-	}
-	if cfg.ClaimReclaimIntervalMs != 15000 {
-		t.Errorf("ClaimReclaimIntervalMs = %d, want 15000", cfg.ClaimReclaimIntervalMs)
-	}
 
-	// The synthesized blob must satisfy the real loader end to end.
+	// The synthesized blob must satisfy the real loader end to end (defaults
+	// for claim lease/reclaim are applied by LoadSortedSetConfig).
 	if _, err := redis.LoadSortedSetConfig(data); err != nil {
 		t.Errorf("LoadSortedSetConfig rejected synthesized config: %v", err)
 	}

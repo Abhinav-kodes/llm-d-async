@@ -205,14 +205,12 @@ func (o *Options) synthesizeRedisSortedSetConfig() ([]byte, error) {
 		return nil, err
 	}
 	cfg := redis.SortedSetConfig{
-		URL:                    o.RedisConnection.URL,
-		ResultQueueName:        o.RedisSortedSet.ResultQueueName,
-		PollIntervalMs:         o.RedisSortedSet.PollIntervalMs,
-		BatchSize:              o.RedisSortedSet.BatchSize,
-		EnableTracing:          o.Observability.RedisTracing,
-		ClaimLeaseTTLSeconds:   300,
-		ClaimReclaimIntervalMs: 15000,
-		Queues:                 queues,
+		URL:             o.RedisConnection.URL,
+		ResultQueueName: o.RedisSortedSet.ResultQueueName,
+		PollIntervalMs:  o.RedisSortedSet.PollIntervalMs,
+		BatchSize:       o.RedisSortedSet.BatchSize,
+		EnableTracing:   o.Observability.RedisTracing,
+		Queues:          queues,
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
