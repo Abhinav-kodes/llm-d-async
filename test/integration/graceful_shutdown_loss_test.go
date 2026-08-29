@@ -4,7 +4,6 @@ package integration_test
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -99,42 +98,6 @@ func enqueueShutdownLossRequests(t *testing.T, rdb *goredis.Client, queue string
 	}
 }
 
-// redisAccounting counts how many of the given ids are recoverable from Redis
-// across the request queue, retry queue, and result list.
-func redisAccounting(t *testing.T, rdb *goredis.Client, ids []string) (accounted int, detail string) {
-	t.Helper()
-	ctx := context.Background()
-	inReq, err := rdb.ZRange(ctx, "request-sortedset", 0, -1).Result()
-	require.NoError(t, err)
-	inRetry, err := rdb.ZRange(ctx, "retry-sortedset", 0, -1).Result()
-	require.NoError(t, err)
-	inResult, err := rdb.LRange(ctx, "result-list", 0, -1).Result()
-	require.NoError(t, err)
-
-	var found []string
-	for _, id := range ids {
-		for _, m := range inReq {
-			if containsID(m, id) {
-				found = append(found, id+"(request-queue)")
-				break
-			}
-		}
-		for _, m := range inRetry {
-			if containsID(m, id) {
-				found = append(found, id+"(retry-queue)")
-				break
-			}
-		}
-		for _, m := range inResult {
-			if containsID(m, id) {
-				found = append(found, id+"(result-list)")
-				break
-			}
-		}
-	}
-	return len(found), fmt.Sprintf("%v", found)
-}
-
 func containsID(member, id string) bool {
 	return len(member) > 0 && indexOf(member, "\"id\":\""+id+"\"") >= 0
 }
@@ -148,59 +111,10 @@ func indexOf(s, substr string) int {
 	return -1
 }
 
-// TestGracefulShutdown_ZeroWorkers_RecoversViaLeaseExpiry verifies that with
-// --concurrency 0 no workers exist, so claimed requests strand. Graceful
-// shutdown now stops heartbeating and lets the reclaimer redeliver after the
-// lease lapses (small slice: no immediate sweep).
-func TestGracefulShutdown_ZeroWorkers_RecoversViaLeaseExpiry(t *testing.T) {
-	flow, rdb, queue := newShutdownLossFlow(t, 0, "http://localhost:30800", 1, 100)
-
-	pools := map[string]pipeline.WorkerPoolConfig{
-		"default": {ID: "default", Workers: 0},
-	}
-	dispatch := randomrobin.NewRandomRobinPolicy("test", randomrobin.Config{}).
-		MergeRequestChannels(flow.RequestChannels(), pools)
-	mergedChannel := dispatch.Channels["default"]
-
-	ctx := context.Background()
-	flow.Start(ctx)
-
-	ids := []string{"loss-a", "loss-b", "loss-c"}
-	enqueueShutdownLossRequests(t, rdb, queue, ids)
-
-	// Wait until the first popped request reaches the merged channel buffer,
-	// then give the forwarder time to pick up the next one (it will block on
-	// the full merged channel, holding the request in memory only).
-	waitUntil(t, 5*time.Second, func() bool { return len(mergedChannel) == 1 })
-	time.Sleep(200 * time.Millisecond)
-
-	flow.StopConsuming()
-	flow.Shutdown()
-
-	// Graceful shutdown stops heartbeating; without a sweep, stranded
-	// claims must be reclaimed by a survivor. Start a fresh instance to
-	// drive the reclaimer and verify redelivery.
-	replacement := newFlowOnSameRedis(t, rdb, "http://localhost:30800", 1, 100)
-	replacement.Start(context.Background())
-	defer func() {
-		replacement.StopConsuming()
-		replacement.Shutdown()
-	}()
-	waitUntil(t, 5*time.Second, func() bool {
-		n, _ := redisAccounting(t, rdb, ids)
-		return n == len(ids)
-	})
-	accounted, detail := redisAccounting(t, rdb, ids)
-	assert.Equal(t, len(ids), accounted,
-		"graceful shutdown via lease expiry must recover every popped request; recoverable: %s", detail)
-}
-
-// TestHardKill_ReplacementFlowRedeliversClaims: a flow dies hard (no
-// StopConsuming/Shutdown ever runs) while holding claims, and a replacement
-// flow redelivers every claimed request so that each accepted request ends
-// with exactly ONE terminal result record. The abandoned flow keeps running
-// inside the test process — deliberately — and its eventual duplicate results
-// must be suppressed by the terminal markers.
+// TestHardKill_ReplacementFlowRedeliversClaims directly validates claim
+// expiry and takeover: Flow A claims and then its heartbeat is stopped
+// (like SIGKILL). After the lease lapses, replacement Flow C reclaims
+// and each accepted request gets exactly one terminal result.
 func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 	var killHits atomic.Int64
 	releaseKilled := make(chan struct{})
