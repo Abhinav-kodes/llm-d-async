@@ -23,8 +23,7 @@ Dequeue is now **peek → claim → ack**:
 2. **Claim** — for each entry that passes deadline/cancellation/gate checks, a
    Lua script atomically moves it out of the pending set into claim
    bookkeeping:
-   - `<queue>:claimed` — hash of the original member JSON (plus its original
-     sort score under a `<id>:score` field),
+   - `<queue>:claimed` — hash of the original member JSON,
    - `<queue>:claim-owners` — a random ownership token per claim,
    - `<queue>:claims-idx` — zset of claims scored by lease expiry
       (`min(claim_lease_ttl, deadline + 5m)`).

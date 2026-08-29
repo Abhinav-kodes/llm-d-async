@@ -230,13 +230,13 @@ func NewRedisSortedSetFlow(cfg SortedSetConfig, workerPools []pipeline.WorkerPoo
 
 func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	logger := log.FromContext(ctx)
-	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(ctx, logger))
+	consumeCtx, consumeCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.consumeCancel = consumeCancel
 
-	drainCtx, drainCancel := context.WithCancel(log.IntoContext(ctx, logger))
+	drainCtx, drainCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.drainCancel = drainCancel
 
-	hbCtx, hbCancel := context.WithCancel(log.IntoContext(ctx, logger))
+	hbCtx, hbCancel := context.WithCancel(log.IntoContext(context.Background(), logger))
 	r.hbCancel = hbCancel
 
 	for _, ch := range r.requestChannels {
@@ -263,6 +263,13 @@ func (r *RedisSortedSetFlow) Start(ctx context.Context) {
 	// only after the drain workers are done.
 	r.hbWg.Add(1)
 	go func() { defer r.hbWg.Done(); r.startHeartbeat(hbCtx) }()
+}
+
+func (r *RedisSortedSetFlow) StopHeartbeatForTest() {
+	if r.hbCancel != nil {
+		r.hbCancel()
+	}
+	r.hbWg.Wait()
 }
 
 func (r *RedisSortedSetFlow) StopConsuming() {

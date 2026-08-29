@@ -224,12 +224,11 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 	mergedA := dispatchA.Channels["default"]
 
 	clientA := asyncworker.NewHTTPInferenceClient(killedServer.Client())
-	ctxA, cancelA := context.WithCancel(context.Background())
-	go asyncworker.WorkerWithGate(ctxA, ctxA,
+	go asyncworker.WorkerWithGate(context.Background(), context.Background(),
 		pipeline.Characteristics{}, clientA, mergedA, flowA.RetryChannel(), flowA.ResultChannel(),
 		time.Minute, nil, nil)
 
-	flowA.Start(ctxA)
+	flowA.Start(context.Background())
 
 	ids := []string{"kill-a", "kill-b", "kill-c"}
 	enqueueShutdownLossRequests(t, rdbA, queue, ids)
@@ -244,9 +243,9 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 		require.True(t, exists, "flow A should hold claim for %s", id)
 	}
 
-	// ☠ HARD KILL: cancel flow A’s context (like SIGKILL) — no
-	// StopConsuming/Shutdown, heartbeat stops and claims simply lapse.
-	cancelA()
+	// HARD KILL: stop heartbeat like SIGKILL — no
+	// StopConsuming/Shutdown, claims simply lapse after TTL.
+	flowA.StopHeartbeatForTest()
 
 	// Replacement flow C: healthy IGW returning success immediately.
 	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
