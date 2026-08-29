@@ -81,18 +81,15 @@ return 1
 
 // ACKRESULT records a terminal result and drops the claim atomically.
 // Only the current owner may publish; stale owners are fenced. Missing
-// owners are fenced unless token is empty (direct push without claim,
-// tests) — stale owners with a token vs missing owner are still fenced.
+// owners or token mismatches return 0, preventing duplicate pushes.
 //
 // KEYS: claimed, owners, idx, resultList
 // ARGV: id, resultJSON, token, listTTLSeconds
 // Returns 1 when the result was recorded, 0 when fenced as stale.
 var ackResultScript = redis.NewScript(`
 local owner = redis.call('HGET', KEYS[2], ARGV[1])
-if owner ~= ARGV[3] then
-  if not (owner == false and ARGV[3] == "") then
-    return 0
-  end
+if not owner or owner ~= ARGV[3] or ARGV[3] == "" then
+  return 0
 end
 redis.call('LPUSH', KEYS[4], ARGV[2])
 local listTTL = tonumber(ARGV[4])
@@ -234,7 +231,7 @@ func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string,
 
 // ackResult records a terminal result (idempotently) and drops this flow's
 // claim. claimQueueName hosts the claim bookkeeping; resultList is the
-// resolved destination. pushed=false means a duplicate was suppressed.
+// resolved destination. pushed=false means a stale owner was fenced.
 func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName string, resultList string, requestID string, requestToken string, resultJSON string, listTTL time.Duration) (pushed bool, err error) {
 	// Peek the token rather than consuming it: if the script errors the
 	// caller may retry this ack, and the ownership proof must survive.

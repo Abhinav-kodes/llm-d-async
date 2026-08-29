@@ -133,7 +133,7 @@ func TestReleaseClaim_RestoresOriginalScoreAndHonorsToken(t *testing.T) {
 	}
 }
 
-func TestAckResult_PushesOnceThenSuppressesDuplicates(t *testing.T) {
+func TestAckResult_PushesOnceThenFencesDuplicates(t *testing.T) {
 	_, rdb, ctx, flow := newClaimTestFlow(t)
 
 	ir, member := claimEnvelope(t, "c1", testDeadline)
@@ -147,14 +147,12 @@ func TestAckResult_PushesOnceThenSuppressesDuplicates(t *testing.T) {
 		t.Fatalf("first ack: pushed=%v err=%v", pushed, err)
 	}
 	pushed, err = flow.ackResult(ctx, "q", "results", "c1", ir.RequestToken, `{"id":"c1"}`, 0)
-	// Empty token after handle deletion is allowed for direct pushes (tests);
-	// stale owners with a non-empty token would be fenced. Same-instance
-	// retry with empty token is at-least-once.
-	if err != nil || !pushed {
-		t.Fatalf("second ack (empty token, no owner): pushed=%v err=%v, want true/nil", pushed, err)
+	// Second ack after handle deletion and owner removal must be fenced (returns false, nil).
+	if err != nil || pushed {
+		t.Fatalf("second ack should be fenced: pushed=%v err=%v, want false/nil", pushed, err)
 	}
-	if n, _ := rdb.LLen(ctx, "results").Result(); n != 2 {
-		t.Fatalf("result list len = %d, want 2 (empty token allowed)", n)
+	if n, _ := rdb.LLen(ctx, "results").Result(); n != 1 {
+		t.Fatalf("result list len = %d, want 1", n)
 	}
 	// Ack must drop the claim so the reclaimer never redelivers it.
 	if exists, _ := rdb.HExists(ctx, newClaimKeys("q").claimed, "c1").Result(); exists {
@@ -234,7 +232,7 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 	// (lease scores are unix seconds; same-second rewrites would compare equal).
 	flow.claimLeaseTTL = time.Hour
 	var c1Token string
-	if v, ok := flow.claimTokens.Load("c1"); ok {
+	if v, ok := flow.claimTokens.Load(claimKey("c1", ir.RequestToken)); ok {
 		if h, ok := v.(*claimHandle); ok {
 			c1Token = h.token
 		}

@@ -330,7 +330,7 @@ func (r *RedisSortedSetFlow) QueueBacklog(ctx context.Context) ([]pipeline.Queue
 		var cardCmd *redis.IntCmd
 		countCmds := make([]*redis.IntCmd, 0, len(buckets))
 		// One MULTI/EXEC round trip per queue: the sorted set is mutated by
-		// ZPopMin between polls, so a single snapshot keeps Depth and the
+		// claims between polls, so a single snapshot keeps Depth and the
 		// bucket counts mutually consistent.
 		_, err := r.rdb.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 			cardCmd = pipe.ZCard(ctx, cd.queueName)
