@@ -160,6 +160,18 @@ func (c *SortedSetConfig) Validate() error {
 	if c.URL == "" {
 		return fmt.Errorf("url is required (set url in the transport config or REDIS_URL)")
 	}
+	if c.PollIntervalMs < 0 {
+		return fmt.Errorf("poll_interval_ms must be non-negative")
+	}
+	if c.BatchSize < 0 {
+		return fmt.Errorf("batch_size must be non-negative")
+	}
+	if c.ClaimLeaseTTLSeconds < 0 {
+		return fmt.Errorf("claim_lease_ttl_seconds must be non-negative")
+	}
+	if c.ClaimReclaimIntervalMs < 0 {
+		return fmt.Errorf("claim_reclaim_interval_ms must be non-negative")
+	}
 	if len(c.Queues) == 0 {
 		return fmt.Errorf("at least one queue must be configured")
 	}
