@@ -24,7 +24,13 @@ func newClaimTestFlow(t *testing.T) (*miniredis.Miniredis, *redis.Client, contex
 		batchSize:            10,
 		claimLeaseTTL:        200 * time.Millisecond,
 		claimReclaimInterval: 50 * time.Millisecond,
-		requestChannels:      []requestChannelData{{queueName: "q", queueID: "q"}},
+		queues: map[string]*queueRuntime{
+			"q": {data: requestChannelData{
+				queueName: "q",
+				queueID:   "q",
+			}},
+		},
+		queueOrder: []string{"q"},
 	}
 	return s, rdb, context.Background(), flow
 }

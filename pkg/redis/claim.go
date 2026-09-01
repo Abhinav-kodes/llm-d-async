@@ -279,7 +279,7 @@ func (r *RedisSortedSetFlow) reclaimExpiredClaims(ctx context.Context) (released
 	logger := log.FromContext(ctx)
 	now := float64(time.Now().Unix())
 
-	for _, ch := range r.requestChannels {
+	for _, ch := range r.queueSnapshot() {
 		queueName := ch.queueName
 		keys := newClaimKeys(queueName)
 		expiredIDs, err := r.rdb.ZRangeArgs(ctx, redis.ZRangeArgs{
@@ -322,7 +322,11 @@ func (r *RedisSortedSetFlow) reclaimExpiredClaims(ctx context.Context) (released
 // shutdown window, catching claims abandoned by workers that hit DrainTimeout.
 func (r *RedisSortedSetFlow) startReclaimer(ctx context.Context) {
 	logger := log.FromContext(ctx)
-	ticker := time.NewTicker(r.claimReclaimInterval)
+	interval := r.claimReclaimInterval
+	if interval <= 0 {
+		interval = 15 * time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

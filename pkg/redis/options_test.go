@@ -97,3 +97,13 @@ func TestSortedSetConfig_ValidateNegativeValues(t *testing.T) {
 		})
 	}
 }
+
+func TestSortedSetConfigEmptyQueuesOnlyAllowedForReload(t *testing.T) {
+	data := []byte(`{"url":"redis://localhost:6379","queues":[]}`)
+	if _, err := LoadSortedSetConfig(data); err == nil {
+		t.Fatal("startup loader accepted an empty queue set")
+	}
+	if _, err := LoadSortedSetConfigAllowEmptyQueues(data); err != nil {
+		t.Fatalf("reload loader rejected empty queue set: %v", err)
+	}
+}
