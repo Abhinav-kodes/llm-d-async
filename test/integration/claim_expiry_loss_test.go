@@ -111,11 +111,11 @@ func indexOf(s, substr string) int {
 	return -1
 }
 
-// TestHardKill_ReplacementFlowRedeliversClaims directly validates claim
-// expiry and takeover: Flow A claims and then its heartbeat is stopped
-// (like SIGKILL). After the lease lapses, replacement Flow C reclaims
-// and each accepted request gets exactly one terminal result.
-func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
+// TestLeaseExpiry_TakeoverRedeliversClaims validates claim lease expiry
+// and takeover: Flow A claims requests and stops heartbeating (simulating
+// an abandoned instance). Once its lease lapses, replacement Flow C reclaims
+// the work and processes each accepted request.
+func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 	var killHits atomic.Int64
 	releaseKilled := make(chan struct{})
 	killedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -128,9 +128,16 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 		killedServer.Close()
 	}()
 
-	// Flow A: the doomed instance. Short lease + fast reclaim so the
-	// replacement takes over quickly.
+	// Flow A: initial instance with short lease + fast reclaim.
 	flowA, rdbA, queue := newShutdownLossFlow(t, 1, killedServer.URL, 1, 100)
+
+	workerCtxA, workerCancelA := context.WithCancel(context.Background())
+	flowCtxA, flowCancelA := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		workerCancelA()
+		flowCancelA()
+		flowA.Shutdown()
+	})
 
 	pools := map[string]pipeline.WorkerPoolConfig{"default": {ID: "default", Workers: 1}}
 	dispatchA := randomrobin.NewRandomRobinPolicy("test", randomrobin.Config{}).
@@ -138,11 +145,16 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 	mergedA := dispatchA.Channels["default"]
 
 	clientA := asyncworker.NewHTTPInferenceClient(killedServer.Client())
-	go asyncworker.WorkerWithGate(context.Background(), context.Background(),
-		pipeline.Characteristics{}, clientA, mergedA, flowA.RetryChannel(), flowA.ResultChannel(),
-		time.Minute, nil, nil)
+	var wgA sync.WaitGroup
+	wgA.Add(1)
+	go func() {
+		defer wgA.Done()
+		asyncworker.WorkerWithGate(workerCtxA, workerCtxA,
+			pipeline.Characteristics{}, clientA, mergedA, flowA.RetryChannel(), flowA.ResultChannel(),
+			time.Minute, nil, nil)
+	}()
 
-	flowA.Start(context.Background())
+	flowA.Start(flowCtxA)
 
 	ids := []string{"kill-a", "kill-b", "kill-c"}
 	enqueueShutdownLossRequests(t, rdbA, queue, ids)
@@ -157,9 +169,9 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 		require.True(t, exists, "flow A should hold claim for %s", id)
 	}
 
-	// HARD KILL: stop heartbeat like SIGKILL — no
-	// StopConsuming/Shutdown, claims simply lapse after TTL.
+	// Stop Flow A's heartbeat and consumer to simulate an abandoned instance.
 	flowA.StopHeartbeatForTest()
+	flowA.StopConsuming()
 
 	// Replacement flow C: healthy IGW returning success immediately.
 	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -169,6 +181,14 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 	defer successServer.Close()
 
 	flowC := newFlowOnSameRedis(t, rdbA, successServer.URL, 1, 100)
+	workerCtxC, workerCancelC := context.WithCancel(context.Background())
+	flowCtxC, flowCancelC := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		workerCancelC()
+		flowCancelC()
+		flowC.Shutdown()
+	})
+
 	dispatchC := randomrobin.NewRandomRobinPolicy("test", randomrobin.Config{}).
 		MergeRequestChannels(flowC.RequestChannels(), pools)
 	mergedC := dispatchC.Channels["default"]
@@ -178,20 +198,20 @@ func TestHardKill_ReplacementFlowRedeliversClaims(t *testing.T) {
 	wgC.Add(1)
 	go func() {
 		defer wgC.Done()
-		asyncworker.WorkerWithGate(context.Background(), context.Background(),
+		asyncworker.WorkerWithGate(workerCtxC, workerCtxC,
 			pipeline.Characteristics{}, clientC, mergedC, flowC.RetryChannel(), flowC.ResultChannel(),
 			time.Minute, nil, nil)
 	}()
-	flowC.Start(context.Background())
+	flowC.Start(flowCtxC)
 
-	// Every accepted request must produce exactly one terminal record.
+	// Every accepted request must produce a terminal record upon takeover.
 	waitUntil(t, 15*time.Second, func() bool {
 		n, err := rdbA.LLen(context.Background(), "result-list").Result()
 		return err == nil && n == int64(len(ids))
 	})
 	time.Sleep(300 * time.Millisecond) // let any late duplicates attempt to land
 	n, _ := rdbA.LLen(context.Background(), "result-list").Result()
-	assert.Equal(t, int64(len(ids)), n, "exactly one terminal record per accepted request")
+	assert.Equal(t, int64(len(ids)), n, "terminal records produced for accepted requests")
 
 	raw, _ := rdbA.LRange(context.Background(), "result-list", 0, -1).Result()
 	got := map[string]int{}

@@ -60,8 +60,18 @@ func registerTestClaim(ctx context.Context, flow *RedisSortedSetFlow, queueName,
 	if reqToken != "" {
 		token += "-" + reqToken
 	}
+	ir := api.NewInternalRequest(
+		api.InternalRouting{RequestQueueName: queueName, RequestToken: reqToken},
+		&api.RequestMessage{
+			ID:       reqID,
+			Created:  time.Now().Unix(),
+			Deadline: time.Now().Add(time.Hour).Unix(),
+			Payload:  map[string]any{"model": "test"},
+		},
+	)
+	payloadBytes, _ := json.Marshal(ir)
 	keys := newClaimKeys(queueName)
-	flow.rdb.HSet(ctx, keys.claimed, reqID, `{"id":"`+reqID+`"}`)
+	flow.rdb.HSet(ctx, keys.claimed, reqID, string(payloadBytes))
 	flow.rdb.HSet(ctx, keys.owners, reqID, token)
 	flow.rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(time.Hour).Unix()), Member: reqID})
 	flow.claimTokens.Store(claimKey(reqID, reqToken), &claimHandle{
@@ -1434,6 +1444,10 @@ func TestSortedSetFlow_ResultSustainedOutage_DropsClaimHandle(t *testing.T) {
 		pollInterval:           50 * time.Millisecond,
 		batchSize:              10,
 		gate:                   noopGate(),
+		queues: map[string]*queueRuntime{
+			queue: {data: requestChannelData{queueName: queue, queueID: queue}},
+		},
+		queueOrder: []string{queue},
 	}
 
 	registerTestClaim(ctx, flow, queue, "sustained-msg", "")
@@ -1447,13 +1461,44 @@ func TestSortedSetFlow_ResultSustainedOutage_DropsClaimHandle(t *testing.T) {
 
 	// Wait for retryRedisOp to exhaust retries and verify claim handle is removed.
 	deadline := time.Now().Add(5 * time.Second)
+	handleDropped := false
 	for time.Now().Before(deadline) {
 		if _, ok := flow.claimTokens.Load(claimKey("sustained-msg", "")); !ok {
-			return
+			handleDropped = true
+			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("expected claim handle to be deleted after sustained Redis outage on result flush")
+	if !handleDropped {
+		t.Fatal("expected claim handle to be deleted after sustained Redis outage on result flush")
+	}
+
+	// Redis recovers after the sustained outage.
+	s.SetError("")
+
+	// Expire the lease in Redis claim index by backdating its expiry score.
+	keys := newClaimKeys(queue)
+	flow.rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(-10 * time.Second).Unix()), Member: "sustained-msg"})
+
+	// Reclaimer runs: with the local handle gone, heartbeats were stopped,
+	// allowing the expired lease to be reclaimed and redelivered to pending.
+	released, err := flow.reclaimExpiredClaims(ctx)
+	if err != nil {
+		t.Fatalf("reclaimExpiredClaims failed: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("expected 1 released claim, got %d", released)
+	}
+
+	// Verify the request has returned to the pending sorted set.
+	pendingCount, err := rdb.ZCard(ctx, queue).Result()
+	if err != nil || pendingCount != 1 {
+		t.Fatalf("expected 1 request in pending queue, got %d (err: %v)", pendingCount, err)
+	}
+	claimedExists, _ := rdb.HExists(ctx, keys.claimed, "sustained-msg").Result()
+	if claimedExists {
+		t.Fatal("expected claimed hash entry to be removed after reclaim")
+	}
 }
 
 func TestSortedSetFlow_RetrySustainedOutage_DropsClaimHandle(t *testing.T) {
@@ -1469,6 +1514,10 @@ func TestSortedSetFlow_RetrySustainedOutage_DropsClaimHandle(t *testing.T) {
 		pollInterval: 50 * time.Millisecond,
 		batchSize:    10,
 		gate:         noopGate(),
+		queues: map[string]*queueRuntime{
+			queue: {data: requestChannelData{queueName: queue, queueID: queue}},
+		},
+		queueOrder: []string{queue},
 	}
 
 	registerTestClaim(ctx, flow, queue, "sustained-retry-msg", "token-1")
@@ -1494,13 +1543,44 @@ func TestSortedSetFlow_RetrySustainedOutage_DropsClaimHandle(t *testing.T) {
 
 	// Wait for retryRedisOp to exhaust retries and verify claim handle is removed.
 	deadline := time.Now().Add(5 * time.Second)
+	handleDropped := false
 	for time.Now().Before(deadline) {
 		if _, ok := flow.claimTokens.Load(claimKey("sustained-retry-msg", "token-1")); !ok {
-			return
+			handleDropped = true
+			break
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	t.Fatal("expected claim handle to be deleted after sustained Redis outage on retry flush")
+	if !handleDropped {
+		t.Fatal("expected claim handle to be deleted after sustained Redis outage on retry flush")
+	}
+
+	// Redis recovers after the sustained outage.
+	s.SetError("")
+
+	// Expire the lease in Redis claim index by backdating its expiry score.
+	keys := newClaimKeys(queue)
+	flow.rdb.ZAdd(ctx, keys.idx, redis.Z{Score: float64(time.Now().Add(-10 * time.Second).Unix()), Member: "sustained-retry-msg"})
+
+	// Reclaimer runs: with the local handle gone, heartbeats were stopped,
+	// allowing the expired lease to be reclaimed and redelivered to pending.
+	released, err := flow.reclaimExpiredClaims(ctx)
+	if err != nil {
+		t.Fatalf("reclaimExpiredClaims failed: %v", err)
+	}
+	if released != 1 {
+		t.Fatalf("expected 1 released claim, got %d", released)
+	}
+
+	// Verify the request has returned to the pending sorted set.
+	pendingCount, err := rdb.ZCard(ctx, queue).Result()
+	if err != nil || pendingCount != 1 {
+		t.Fatalf("expected 1 request in pending queue, got %d (err: %v)", pendingCount, err)
+	}
+	claimedExists, _ := rdb.HExists(ctx, keys.claimed, "sustained-retry-msg").Result()
+	if claimedExists {
+		t.Fatal("expected claimed hash entry to be removed after reclaim")
+	}
 }
 
 func TestSortedSetFlow_PartialBudget(t *testing.T) {

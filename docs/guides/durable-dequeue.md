@@ -57,19 +57,20 @@ Every exit path is paired with exactly one claim outcome:
 
 - **At-least-once execution**: a request whose owner crashed is re-run by the
   survivor. Expensive inference may execute twice across a failure.
-- **At-most-once terminal record per claim**: only the current lease owner may
-  publish; stale completions are fenced (`owners[id]==claimToken`). Combined
-  with at-least-once redelivery, consumers observe one terminal record per
-  accepted request-generation (`ID+RequestToken`).
+- **At-most-once terminal record per claim lease**: only the current lease owner
+  may publish; completions from stale owners whose lease has lapsed are fenced
+  (`owners[id]==claimToken`). Note that claim fencing is per-claim; it does
+  not by itself guarantee a single terminal record across separate redelivery
+  generations if downstream systems allow multiple active executions.
 - Ordering within a queue remains earliest-deadline-first; release and
   redelivery restore the original sort score.
 
 ## Configuration
 
-| Config JSON field           | Default | Meaning                                                                                                                                                          |
-| -----------------------------| ---------| ------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `claim_lease_ttl_seconds`   | `300`   | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. Must exceed the longest inference plus drain time. |
-| `claim_reclaim_interval_ms` | `15000` | How often expired claims are scanned for redelivery. This bounds how long a crashed instance's work stalls.                                                      |
+| Config JSON field           | Default | Meaning                                                                                                                                                                                                                                                          |
+| ----------------------------| --------| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `claim_lease_ttl_seconds`   | `300`   | Crash-detection window: how long a claim survives without a heartbeat before survivors redeliver the request. Because in-flight claims are renewed periodically by the heartbeater, this TTL does not need to cover the entire inference duration; it only needs to exceed several heartbeat intervals to absorb transient network jitter. |
+| `claim_reclaim_interval_ms` | `15000` | How often expired claims are scanned for redelivery. This bounds how long a crashed instance's work stalls.                                                                                                                                                    |
 
 Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclaim_interval_ms`); CLI flags are deferred to a follow-up. The heartbeat interval is derived (`lease TTL / 3`, clamped to 1s–30s) and is not separately configurable. Claim metrics are deferred to a follow-up once the core path is proven.
 
@@ -94,8 +95,8 @@ Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclai
 - If a crash occurs while a request sits in the retry queue, the reclaimer
   may redeliver the original claimed payload while the retry-queue copy
   re-enters pending via the mover — at-most one extra pending entry, bounded,
-  with duplicate terminal publication prevented by claim fencing. This is a
-  known trade-off to be addressed with a unified retry/claim lifecycle.
+  with stale claim publication prevented by token fencing on each claim. This
+  is a known trade-off to be addressed with a unified retry/claim lifecycle.
 - No delivery counter or dead-letter queue: redelivery is bounded by each
   request's deadline — once it passes, the deadline-exceeded path produces the
   terminal record. Projects like asynq cap attempts and archive instead; here
