@@ -1389,6 +1389,89 @@ func TestSortedSetFlow_RetryBatchAfterFailure(t *testing.T) {
 	t.Fatal("Expected retry message to be enqueued after transient Redis failure")
 }
 
+func TestSortedSetFlow_ResultSustainedOutage_DropsClaimHandle(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "sustained-result-queue"
+	flow := &RedisSortedSetFlow{
+		defaultResultQueueName: queue,
+		rdb:                    rdb,
+		resultChannel:          make(chan api.ResultMessage, resultChannelBuffer),
+		pollInterval:           50 * time.Millisecond,
+		batchSize:              10,
+		gate:                   noopGate(),
+	}
+
+	registerTestClaim(ctx, flow, queue, "sustained-msg", "")
+
+	// Inject permanent error so retries are completely exhausted.
+	s.SetError("READONLY simulated permanent failure")
+
+	go flow.resultWorker(ctx)
+
+	flow.resultChannel <- api.ResultMessage{ID: "sustained-msg", Payload: "data"}
+
+	// Wait for retryRedisOp to exhaust retries and verify claim handle is removed.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := flow.claimTokens.Load(claimKey("sustained-msg", "")); !ok {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("expected claim handle to be deleted after sustained Redis outage on result flush")
+}
+
+func TestSortedSetFlow_RetrySustainedOutage_DropsClaimHandle(t *testing.T) {
+	s, rdb, ctx, cancel := setupTest(t)
+	defer s.Close()
+	defer rdb.Close() // nolint:errcheck
+	defer cancel()
+
+	queue := "sustained-retry-queue"
+	flow := &RedisSortedSetFlow{
+		rdb:          rdb,
+		retryChannel: make(chan pipeline.RetryMessage, 10),
+		pollInterval: 50 * time.Millisecond,
+		batchSize:    10,
+		gate:         noopGate(),
+	}
+
+	registerTestClaim(ctx, flow, queue, "sustained-retry-msg", "token-1")
+
+	// Inject permanent error so retries are completely exhausted.
+	s.SetError("READONLY simulated permanent failure")
+
+	go flow.retryWorker(ctx)
+
+	flow.retryChannel <- pipeline.RetryMessage{
+		EmbelishedRequestMessage: pipeline.EmbelishedRequestMessage{
+			InternalRequest: api.NewInternalRequest(
+				api.InternalRouting{RequestQueueName: queue, RequestToken: "token-1"},
+				&api.RequestMessage{
+					ID:       "sustained-retry-msg",
+					Created:  time.Now().Unix(),
+					Deadline: 9999999999,
+				},
+			),
+		},
+		BackoffDurationSeconds: 0,
+	}
+
+	// Wait for retryRedisOp to exhaust retries and verify claim handle is removed.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := flow.claimTokens.Load(claimKey("sustained-retry-msg", "token-1")); !ok {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("expected claim handle to be deleted after sustained Redis outage on retry flush")
+}
+
 func TestSortedSetFlow_PartialBudget(t *testing.T) {
 	s, rdb, ctx, cancel := setupTest(t)
 	defer s.Close()

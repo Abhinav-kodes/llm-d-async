@@ -57,10 +57,10 @@ Every exit path is paired with exactly one claim outcome:
 
 - **At-least-once execution**: a request whose owner crashed is re-run by the
   survivor. Expensive inference may execute twice across a failure.
-- **Exactly-once terminal records**: only the current lease owner may
-  publish; stale completions are fenced (`owners[id]==claimToken`). Consumers
-  observe one terminal record per accepted request-generation (`ID+RequestToken`,
-  `custom_id` stays out of it).
+- **At-most-once terminal record per claim**: only the current lease owner may
+  publish; stale completions are fenced (`owners[id]==claimToken`). Combined
+  with at-least-once redelivery, consumers observe one terminal record per
+  accepted request-generation (`ID+RequestToken`).
 - Ordering within a queue remains earliest-deadline-first; release and
   redelivery restore the original sort score.
 
@@ -93,9 +93,9 @@ Tuning is via `transport-config` JSON (`claim_lease_ttl_seconds` / `claim_reclai
   immediate handback can be added as a follow-up once the core path is proven.
 - If a crash occurs while a request sits in the retry queue, the reclaimer
   may redeliver the original claimed payload while the retry-queue copy
-  re-enters pending via the mover — at-most one extra pending entry, bounded
-  and collapsed to one execution by claim fencing. This is a known trade-off
-  to be addressed with a unified retry/claim lifecycle.
+  re-enters pending via the mover — at-most one extra pending entry, bounded,
+  with duplicate terminal publication prevented by claim fencing. This is a
+  known trade-off to be addressed with a unified retry/claim lifecycle.
 - No delivery counter or dead-letter queue: redelivery is bounded by each
   request's deadline — once it passes, the deadline-exceeded path produces the
   terminal record. Projects like asynq cap attempts and archive instead; here
