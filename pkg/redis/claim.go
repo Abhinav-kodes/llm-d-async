@@ -39,9 +39,9 @@ const (
 // claimKeys bundles the Redis keys implementing claims for one queue.
 type claimKeys struct {
 	pending string // zset: reqID-scored members awaiting dispatch
-	claimed string // hash: reqID -> original member JSON
-	owners  string // hash: reqID -> ownership token
-	idx     string // zset: reqID -> lease expiry unix seconds
+	claimed string // hash: claimKey -> original member JSON
+	owners  string // hash: claimKey -> ownership token
+	idx     string // zset: claimKey -> lease expiry unix seconds
 }
 
 func newClaimKeys(queueName string) claimKeys {

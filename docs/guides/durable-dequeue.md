@@ -62,7 +62,7 @@ Every exit path is paired with exactly one claim outcome:
   survivor. Expensive inference may execute twice across a failure.
 - **At-most-once terminal record per claim lease**: only the current lease owner
   may publish; completions from stale owners whose lease has lapsed are fenced
-  (`owners[id]==claimToken`). Note that claim fencing is per-claim; it does
+  (`owners[claimKey]==claimToken`). Note that claim fencing is per-claim; it does
   not by itself guarantee a single terminal record across separate redelivery
   generations if downstream systems allow multiple active executions.
 - Ordering within a queue remains earliest-deadline-first; release and

@@ -133,9 +133,16 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 
 	workerCtxA, workerCancelA := context.WithCancel(context.Background())
 	flowCtxA, flowCancelA := context.WithCancel(context.Background())
+	var wgA sync.WaitGroup
 	t.Cleanup(func() {
+		select {
+		case <-releaseKilled:
+		default:
+			close(releaseKilled)
+		}
 		workerCancelA()
 		flowCancelA()
+		wgA.Wait()
 		flowA.Shutdown()
 	})
 
@@ -145,7 +152,6 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 	mergedA := dispatchA.Channels["default"]
 
 	clientA := asyncworker.NewHTTPInferenceClient(killedServer.Client())
-	var wgA sync.WaitGroup
 	wgA.Add(1)
 	go func() {
 		defer wgA.Done()
@@ -201,21 +207,11 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 	flowC.Start(flowCtxC)
 
 	t.Cleanup(func() {
-		// Clean up Flow C and its workers
 		flowC.StopConsuming()
 		workerCancelC()
 		flowCancelC()
 		wgC.Wait()
 		flowC.Shutdown()
-
-		// Unblock killed server so Worker A can exit cleanly
-		select {
-		case <-releaseKilled:
-		default:
-			close(releaseKilled)
-		}
-		workerCancelA()
-		wgA.Wait()
 	})
 
 	// Every accepted request must produce a terminal record upon takeover.
