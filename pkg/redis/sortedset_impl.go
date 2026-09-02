@@ -1144,7 +1144,7 @@ func (r *RedisSortedSetFlow) flushRetryBatch(ctx context.Context, batch []pipeli
 		if token == "" {
 			continue
 		}
-		res, err := r.renewClaim(ctx, entry.originQueue, entry.requestID, entry.requestDeadline, token)
+		res, err := r.renewClaim(ctx, entry.originQueue, entry.requestID, entry.requestToken, entry.requestDeadline, token)
 		if err != nil {
 			logger.V(logutil.DEFAULT).Error(err, "Failed to renew claim for retried request", "id", entry.requestID)
 			continue

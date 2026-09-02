@@ -169,9 +169,10 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 		require.True(t, exists, "flow A should hold claim for %s", id)
 	}
 
-	// Stop Flow A's heartbeat and consumer to simulate an abandoned instance.
-	flowA.StopHeartbeatForTest()
+	// Stop all of Flow A's loops (consumer, mover, reclaimer, heartbeater)
+	// before starting Flow C so the original instance is fully inert.
 	flowA.StopConsuming()
+	flowA.Shutdown()
 
 	// Replacement flow C: healthy IGW returning success immediately.
 	successServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -183,11 +184,6 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 	flowC := newFlowOnSameRedis(t, rdbA, successServer.URL, 1, 100)
 	workerCtxC, workerCancelC := context.WithCancel(context.Background())
 	flowCtxC, flowCancelC := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		workerCancelC()
-		flowCancelC()
-		flowC.Shutdown()
-	})
 
 	dispatchC := randomrobin.NewRandomRobinPolicy("test", randomrobin.Config{}).
 		MergeRequestChannels(flowC.RequestChannels(), pools)
@@ -203,6 +199,24 @@ func TestLeaseExpiry_TakeoverRedeliversClaims(t *testing.T) {
 			time.Minute, nil, nil)
 	}()
 	flowC.Start(flowCtxC)
+
+	t.Cleanup(func() {
+		// Clean up Flow C and its workers
+		flowC.StopConsuming()
+		workerCancelC()
+		flowCancelC()
+		wgC.Wait()
+		flowC.Shutdown()
+
+		// Unblock killed server so Worker A can exit cleanly
+		select {
+		case <-releaseKilled:
+		default:
+			close(releaseKilled)
+		}
+		workerCancelA()
+		wgA.Wait()
+	})
 
 	// Every accepted request must produce a terminal record upon takeover.
 	waitUntil(t, 15*time.Second, func() bool {

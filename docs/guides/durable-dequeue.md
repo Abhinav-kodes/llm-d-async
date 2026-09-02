@@ -22,15 +22,18 @@ Dequeue is now **peek → claim → ack**:
    (non-destructive). Nothing leaves the pending sorted set yet.
 2. **Claim** — for each entry that passes deadline/cancellation/gate checks, a
    Lua script atomically moves it out of the pending set into claim
-   bookkeeping:
-   - `<queue>:claimed` — hash of the original member JSON,
-   - `<queue>:claim-owners` — a random ownership token per claim,
-   - `<queue>:claims-idx` — zset of claims scored by lease expiry
+   bookkeeping, keyed by generation identity (`claimKey = ID + RequestToken`):
+   - `<queue>:claimed` — hash of `claimKey -> original member JSON`,
+   - `<queue>:claim-owners` — hash of `claimKey -> random ownership token`,
+   - `<queue>:claims-idx` — zset of `claimKey` scored by lease expiry
       (`min(claim_lease_ttl, deadline + 5m)`).
+   Because entries in Redis are keyed by `ID + RequestToken`, concurrent or
+   repeated submissions using the same request ID never overwrite each other's
+   durable claim payload, owner token, or expiry index.
 3. **Process as before** — claimed requests flow through the same channels,
    merge policy, and workers. No downstream change.
 4. **Ack** — when a terminal result is flushed, one Lua script checks
-   `owners[id]==claimToken`, pushes the record, and drops the claim —
+   `owners[claimKey]==claimToken`, pushes the record, and drops the claim —
    atomically. Stale owners are fenced and cannot publish. A crash between
    "inference done" and "result written" therefore redelivers the request
    instead of losing it. The request-generation identity is `RequestToken`

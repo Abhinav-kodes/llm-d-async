@@ -191,22 +191,21 @@ func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string,
 		return "", false, err
 	}
 	keys := newClaimKeys(queueName)
-	// Redis field is ReqID only; local map is generation-scoped
-	// claimKey(ID+RequestToken) so old result cannot borrow new token —
-	// concurrent same ID with different token never happens in current
-	// batch flow (sequential reuse after ack), see claimKey.
+	// Key Redis claim state by generation (ID + RequestToken) so concurrent
+	// submissions with the same ReqID cannot overwrite each other's claim.
 	reqID := ir.PublicRequest.ReqID()
 	reqToken := ir.RequestToken
+	claimID := claimKey(reqID, reqToken)
 	res, err := claimScript.Run(ctx, r.rdb, []string{
 		keys.pending, keys.claimed, keys.owners, keys.idx,
-	}, reqID, member, token, r.claimExpiry(deadline)).Int()
+	}, claimID, member, token, r.claimExpiry(deadline)).Int()
 	if err != nil {
 		return "", false, fmt.Errorf("claim request %q on queue %q: %w", reqID, queueName, err)
 	}
 	if res == 0 {
 		return "", false, nil
 	}
-	r.claimTokens.Store(claimKey(reqID, reqToken), &claimHandle{
+	r.claimTokens.Store(claimID, &claimHandle{
 		token:        token,
 		queue:        queueName,
 		deadline:     deadline,
@@ -219,13 +218,14 @@ func (r *RedisSortedSetFlow) claimRequest(ctx context.Context, queueName string,
 // releaseClaim returns a claimed request to pending during graceful shutdown.
 func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string, requestID string, requestToken string, member string, deadline float64, token string) error {
 	keys := newClaimKeys(queueName)
+	claimID := claimKey(requestID, requestToken)
 	err := releaseClaimScript.Run(ctx, r.rdb, []string{
 		keys.pending, keys.claimed, keys.owners, keys.idx,
-	}, requestID, member, deadline, token).Err()
+	}, claimID, member, deadline, token).Err()
 	if err != nil {
 		return fmt.Errorf("release claim for %q on queue %q: %w", requestID, queueName, err)
 	}
-	r.claimTokens.Delete(claimKey(requestID, requestToken))
+	r.claimTokens.Delete(claimID)
 	return nil
 }
 
@@ -235,8 +235,9 @@ func (r *RedisSortedSetFlow) releaseClaim(ctx context.Context, queueName string,
 func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName string, resultList string, requestID string, requestToken string, resultJSON string, listTTL time.Duration) (pushed bool, err error) {
 	// Peek the token rather than consuming it: if the script errors the
 	// caller may retry this ack, and the ownership proof must survive.
+	claimID := claimKey(requestID, requestToken)
 	var token string
-	if v, ok := r.claimTokens.Load(claimKey(requestID, requestToken)); ok {
+	if v, ok := r.claimTokens.Load(claimID); ok {
 		if h, ok := v.(*claimHandle); ok {
 			token = h.token
 		}
@@ -248,11 +249,11 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 	}
 	res, err := ackResultScript.Run(ctx, r.rdb, []string{
 		keys.claimed, keys.owners, keys.idx, resultList,
-	}, requestID, resultJSON, token, listTTLSec).Int()
+	}, claimID, resultJSON, token, listTTLSec).Int()
 	if err != nil {
 		return false, fmt.Errorf("ack result for %q: %w", requestID, err)
 	}
-	r.claimTokens.Delete(claimKey(requestID, requestToken))
+	r.claimTokens.Delete(claimID)
 	if res == 0 {
 		return false, nil
 	}
@@ -261,10 +262,11 @@ func (r *RedisSortedSetFlow) ackResult(ctx context.Context, claimQueueName strin
 
 // renewClaim extends the lease of a request being sent to retry. Ownership is
 // retained across the backoff; the eventual terminal result acks and releases.
-func (r *RedisSortedSetFlow) renewClaim(ctx context.Context, queueName string, requestID string, deadline float64, token string) (int, error) {
+func (r *RedisSortedSetFlow) renewClaim(ctx context.Context, queueName string, requestID string, requestToken string, deadline float64, token string) (int, error) {
 	keys := newClaimKeys(queueName)
+	claimID := claimKey(requestID, requestToken)
 	res, err := renewClaimScript.Run(ctx, r.rdb, []string{keys.claimed, keys.idx, keys.owners},
-		requestID, r.claimExpiry(deadline), token).Int()
+		claimID, r.claimExpiry(deadline), token).Int()
 	if err != nil {
 		return 0, fmt.Errorf("renew claim for %q on queue %q: %w", requestID, queueName, err)
 	}
@@ -370,7 +372,7 @@ func (r *RedisSortedSetFlow) heartbeatClaims(ctx context.Context) {
 		if reqID == "" {
 			reqID = id
 		}
-		res, err := r.renewClaim(ctx, h.queue, reqID, h.deadline, h.token)
+		res, err := r.renewClaim(ctx, h.queue, reqID, h.requestToken, h.deadline, h.token)
 		if err != nil {
 			logger.V(logutil.DEBUG).Error(err, "Failed to renew claim lease", "id", id)
 			return true

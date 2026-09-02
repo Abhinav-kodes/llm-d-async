@@ -238,21 +238,22 @@ func TestRenewClaim_ExtendsLiveAndIgnoresMissing(t *testing.T) {
 	// (lease scores are unix seconds; same-second rewrites would compare equal).
 	flow.claimLeaseTTL = time.Hour
 	var c1Token string
-	if v, ok := flow.claimTokens.Load(claimKey("c1", ir.RequestToken)); ok {
+	claimID := claimKey("c1", ir.RequestToken)
+	if v, ok := flow.claimTokens.Load(claimID); ok {
 		if h, ok := v.(*claimHandle); ok {
 			c1Token = h.token
 		}
 	}
-	if _, err := flow.renewClaim(ctx, "q", "c1", float64(testDeadline), c1Token); err != nil {
+	if _, err := flow.renewClaim(ctx, "q", "c1", ir.RequestToken, float64(testDeadline), c1Token); err != nil {
 		t.Fatalf("renew: %v", err)
 	}
-	after, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, "c1").Result()
+	after, _ := rdb.ZScore(ctx, newClaimKeys("q").idx, claimID).Result()
 	if after <= before {
 		t.Fatalf("lease not extended: before=%f after=%f", before, after)
 	}
 
 	// Renewing an unknown request must be a clean no-op (returns 0, no error).
-	if res, err := flow.renewClaim(ctx, "q", "ghost", float64(testDeadline), "ghost-token"); err != nil {
+	if res, err := flow.renewClaim(ctx, "q", "ghost", "", float64(testDeadline), "ghost-token"); err != nil {
 		t.Fatalf("renew ghost returned error: %v", err)
 	} else if res != 0 {
 		t.Fatalf("ghost renewal should return 0, got %d", res)
@@ -301,5 +302,81 @@ func TestHeartbeatClaims_ExtendsLiveLeases(t *testing.T) {
 	}
 	if after-before < time.Hour.Seconds()-10 {
 		t.Fatalf("lease not meaningfully extended: before=%f after=%f", before, after)
+	}
+}
+
+func TestClaimRequest_MultipleGenerationsSameReqID_DoNotOverwrite(t *testing.T) {
+	_, rdb, ctx, flow := newClaimTestFlow(t)
+	keys := newClaimKeys("q")
+
+	// Gen 1
+	ir1 := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q", RequestToken: "token-gen1"}, &api.RequestMessage{
+		ID:       "shared-id",
+		Created:  time.Now().Unix(),
+		Deadline: testDeadline,
+	})
+	b1, _ := json.Marshal(ir1)
+	member1 := string(b1)
+	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member1})
+
+	// Gen 2
+	ir2 := api.NewInternalRequest(api.InternalRouting{RequestQueueName: "q", RequestToken: "token-gen2"}, &api.RequestMessage{
+		ID:       "shared-id",
+		Created:  time.Now().Unix(),
+		Deadline: testDeadline,
+	})
+	b2, _ := json.Marshal(ir2)
+	member2 := string(b2)
+	rdb.ZAdd(ctx, "q", redis.Z{Score: testScore, Member: member2})
+
+	// Claim Gen 1
+	tok1, ok1, err1 := flow.claimRequest(ctx, "q", ir1, member1, float64(testDeadline))
+	if !ok1 || err1 != nil {
+		t.Fatalf("claim gen1: ok=%v err=%v", ok1, err1)
+	}
+
+	// Claim Gen 2
+	tok2, ok2, err2 := flow.claimRequest(ctx, "q", ir2, member2, float64(testDeadline))
+	if !ok2 || err2 != nil {
+		t.Fatalf("claim gen2: ok=%v err=%v", ok2, err2)
+	}
+
+	claimID1 := claimKey("shared-id", "token-gen1")
+	claimID2 := claimKey("shared-id", "token-gen2")
+
+	// Both must exist independently in Redis
+	owner1, _ := rdb.HGet(ctx, keys.owners, claimID1).Result()
+	owner2, _ := rdb.HGet(ctx, keys.owners, claimID2).Result()
+	if owner1 != tok1 {
+		t.Fatalf("owner1 = %q, want %q", owner1, tok1)
+	}
+	if owner2 != tok2 {
+		t.Fatalf("owner2 = %q, want %q", owner2, tok2)
+	}
+	if tok1 == tok2 {
+		t.Fatalf("tokens must differ: %q == %q", tok1, tok2)
+	}
+
+	// Ack Gen 1
+	pushed1, err := flow.ackResult(ctx, "q", "result-list", "shared-id", "token-gen1", `{"id":"shared-id"}`, 0)
+	if !pushed1 || err != nil {
+		t.Fatalf("ack gen1: pushed=%v err=%v", pushed1, err)
+	}
+
+	// Gen 1 must be gone from Redis, but Gen 2 must still be intact
+	if exists, _ := rdb.HExists(ctx, keys.claimed, claimID1).Result(); exists {
+		t.Fatal("gen1 claim still exists in claimed hash")
+	}
+	if exists, _ := rdb.HExists(ctx, keys.claimed, claimID2).Result(); !exists {
+		t.Fatal("gen2 claim was incorrectly dropped when gen1 was acked")
+	}
+
+	// Ack Gen 2
+	pushed2, err := flow.ackResult(ctx, "q", "result-list", "shared-id", "token-gen2", `{"id":"shared-id"}`, 0)
+	if !pushed2 || err != nil {
+		t.Fatalf("ack gen2: pushed=%v err=%v", pushed2, err)
+	}
+	if exists, _ := rdb.HExists(ctx, keys.claimed, claimID2).Result(); exists {
+		t.Fatal("gen2 claim still exists in claimed hash after ack")
 	}
 }
